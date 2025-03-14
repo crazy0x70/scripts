@@ -134,88 +134,82 @@ delete_forwarding() {
     echo -e "${BLUE}当前转发规则:${NC}"
     echo "------------------------------------"
     
-    # 创建临时文件用于存储规则信息
-    TEMP_RULES=$(mktemp)
-    
-    # 提取所有规则
-    awk '
-    BEGIN { count = 0; in_endpoint = 0; endpoint_start = 0; endpoint_end = 0; last_line = 0; }
-    {
-        line[NR] = $0;
-        last_line = NR;
-    }
+    # 简化规则解析并显示
+    RULES=$(awk '
+    BEGIN { count = 0; endpoint_start = 0; }
     /\[\[endpoints\]\]/ { 
-        if (in_endpoint) {
-            endpoint_end = NR - 1;
-            print count ":" endpoint_start ":" endpoint_end;
-        }
-        in_endpoint = 1;
-        endpoint_start = NR;
-        count++;
+      endpoint_start = NR;
+      endpoints[count] = endpoint_start;
+      count++;
     }
     /listen =/ { 
-        if (in_endpoint) {
-            gsub(/"/, "", $3);
-            listen[count-1] = $3;
-        }
+      gsub(/"/, "", $3);
+      listen[count-1] = $3;
     }
     /remote =/ { 
-        if (in_endpoint) {
-            gsub(/"/, "", $3);
-            remote[count-1] = $3;
-        }
+      gsub(/"/, "", $3);
+      remote[count-1] = $3;
     }
     /remote_transport =/ { 
-        if (in_endpoint) {
-            gsub(/"/, "", $3);
-            transport[count-1] = $3;
-        }
+      gsub(/"/, "", $3);
+      transport[count-1] = $3;
     }
     END {
-        if (in_endpoint) {
-            endpoint_end = last_line;
-            print count ":" endpoint_start ":" endpoint_end;
+      for (i = 0; i < count; i++) {
+        if (transport[i]) {
+          print i " : " listen[i] " -> " remote[i] " (加密: " transport[i] ")";
+        } else {
+          print i " : " listen[i] " -> " remote[i];
         }
-        for (i = 0; i < count; i++) {
-            if (transport[i]) {
-                print i ": " listen[i] " -> " remote[i] " (加密: " transport[i] ")";
-            } else {
-                print i ": " listen[i] " -> " remote[i];
-            }
-        }
-    }' "$CONFIG_FILE" > "$TEMP_RULES"
+        print endpoints[i];  # 打印行号信息用于后续处理
+      }
+    }' "$CONFIG_FILE")
     
-    # 显示规则列表供用户选择
-    RULES_COUNT=$(grep -c ":" "$TEMP_RULES" | cut -d ":" -f1)
-    
-    if [ "$RULES_COUNT" -eq 0 ]; then
+    # 检查是否有规则
+    if [ -z "$RULES" ]; then
         echo "没有找到转发规则"
-        rm -f "$TEMP_RULES"
         return
     fi
     
-    # 获取规则位置信息
-    RULE_POSITIONS=$(head -n "$RULES_COUNT" "$TEMP_RULES")
+    # 解析规则和行号信息
+    RULE_COUNT=$(echo "$RULES" | awk 'NR % 2 == 1 {count++} END {print count}')
+    
+    if [ "$RULE_COUNT" -eq 0 ]; then
+        echo "没有找到转发规则"
+        return
+    fi
+    
+    # 将规则和行号信息分开
+    DISPLAY_RULES=$(echo "$RULES" | awk 'NR % 2 == 1 {print}')
+    RULE_LINES=$(echo "$RULES" | awk 'NR % 2 == 0 {print}')
     
     # 显示规则供用户选择
-    tail -n +$((RULES_COUNT+1)) "$TEMP_RULES" | nl -v 0
-    
+    echo "$DISPLAY_RULES"
     echo "------------------------------------"
-    read -p "请输入要删除的规则序号 [0-$((RULES_COUNT-1))]: " RULE_NUM
+    
+    # 用户选择
+    read -p "请输入要删除的规则序号 [0-$((RULE_COUNT-1))]: " RULE_NUM
     
     # 验证输入
-    if ! [[ "$RULE_NUM" =~ ^[0-9]+$ ]] || [ "$RULE_NUM" -ge "$RULES_COUNT" ]; then
+    if ! [[ "$RULE_NUM" =~ ^[0-9]+$ ]] || [ "$RULE_NUM" -ge "$RULE_COUNT" ]; then
         echo -e "${RED}无效的规则序号${NC}"
-        rm -f "$TEMP_RULES"
         return
     fi
     
-    # 获取要删除的规则的位置
-    RULE_POS=$(echo "$RULE_POSITIONS" | sed -n "$((RULE_NUM+1))p")
+    # 获取所选规则的行号
+    LINE_NUM=$(echo "$RULE_LINES" | sed -n "$((RULE_NUM+1))p")
     
-    # 获取规则的开始和结束行号
-    START_LINE=$(echo "$RULE_POS" | cut -d ":" -f2)
-    END_LINE=$(echo "$RULE_POS" | cut -d ":" -f3)
+    # 找到规则的开始和结束位置
+    START_LINE=$LINE_NUM
+    
+    # 找到下一个规则的开始行或文件结束
+    if [ "$RULE_NUM" -lt "$((RULE_COUNT-1))" ]; then
+        NEXT_LINE=$(echo "$RULE_LINES" | sed -n "$((RULE_NUM+2))p")
+        END_LINE=$((NEXT_LINE-1))
+    else
+        # 如果是最后一条规则，则到文件末尾
+        END_LINE=$(wc -l < "$CONFIG_FILE")
+    fi
     
     # 创建新的配置文件，排除要删除的规则
     TEMP_CONFIG=$(mktemp)
@@ -229,9 +223,8 @@ delete_forwarding() {
     fi
     
     # 写入删除行之后的内容
-    TOTAL_LINES=$(wc -l < "$CONFIG_FILE")
-    if [ "$END_LINE" -lt "$TOTAL_LINES" ]; then
-        tail -n $((TOTAL_LINES-END_LINE)) "$CONFIG_FILE" >> "$TEMP_CONFIG"
+    if [ "$END_LINE" -lt "$(wc -l < "$CONFIG_FILE")" ]; then
+        tail -n $(($(wc -l < "$CONFIG_FILE") - END_LINE)) "$CONFIG_FILE" >> "$TEMP_CONFIG"
     fi
     
     # 备份原配置
@@ -241,9 +234,6 @@ delete_forwarding() {
     mv "$TEMP_CONFIG" "$CONFIG_FILE"
     
     echo -e "${GREEN}已删除规则序号 $RULE_NUM${NC}"
-    
-    # 清理临时文件
-    rm -f "$TEMP_RULES"
     
     # 重启服务
     if systemctl is-active --quiet realm; then
@@ -694,88 +684,82 @@ delete_forwarding() {
     echo -e "${BLUE}当前转发规则:${NC}"
     echo "------------------------------------"
     
-    # 创建临时文件用于存储规则信息
-    TEMP_RULES=$(mktemp)
-    
-    # 提取所有规则
-    awk '
-    BEGIN { count = 0; in_endpoint = 0; endpoint_start = 0; endpoint_end = 0; last_line = 0; }
-    {
-        line[NR] = $0;
-        last_line = NR;
-    }
+    # 简化规则解析并显示
+    RULES=$(awk '
+    BEGIN { count = 0; endpoint_start = 0; }
     /\[\[endpoints\]\]/ { 
-        if (in_endpoint) {
-            endpoint_end = NR - 1;
-            print count ":" endpoint_start ":" endpoint_end;
-        }
-        in_endpoint = 1;
-        endpoint_start = NR;
-        count++;
+      endpoint_start = NR;
+      endpoints[count] = endpoint_start;
+      count++;
     }
     /listen =/ { 
-        if (in_endpoint) {
-            gsub(/"/, "", $3);
-            listen[count-1] = $3;
-        }
+      gsub(/"/, "", $3);
+      listen[count-1] = $3;
     }
     /remote =/ { 
-        if (in_endpoint) {
-            gsub(/"/, "", $3);
-            remote[count-1] = $3;
-        }
+      gsub(/"/, "", $3);
+      remote[count-1] = $3;
     }
     /remote_transport =/ { 
-        if (in_endpoint) {
-            gsub(/"/, "", $3);
-            transport[count-1] = $3;
-        }
+      gsub(/"/, "", $3);
+      transport[count-1] = $3;
     }
     END {
-        if (in_endpoint) {
-            endpoint_end = last_line;
-            print count ":" endpoint_start ":" endpoint_end;
+      for (i = 0; i < count; i++) {
+        if (transport[i]) {
+          print i " : " listen[i] " -> " remote[i] " (加密: " transport[i] ")";
+        } else {
+          print i " : " listen[i] " -> " remote[i];
         }
-        for (i = 0; i < count; i++) {
-            if (transport[i]) {
-                print i ": " listen[i] " -> " remote[i] " (加密: " transport[i] ")";
-            } else {
-                print i ": " listen[i] " -> " remote[i];
-            }
-        }
-    }' "$CONFIG_FILE" > "$TEMP_RULES"
+        print endpoints[i];  # 打印行号信息用于后续处理
+      }
+    }' "$CONFIG_FILE")
     
-    # 显示规则列表供用户选择
-    RULES_COUNT=$(grep -c ":" "$TEMP_RULES" | cut -d ":" -f1)
-    
-    if [ "$RULES_COUNT" -eq 0 ]; then
+    # 检查是否有规则
+    if [ -z "$RULES" ]; then
         echo "没有找到转发规则"
-        rm -f "$TEMP_RULES"
         return
     fi
     
-    # 获取规则位置信息
-    RULE_POSITIONS=$(head -n "$RULES_COUNT" "$TEMP_RULES")
+    # 解析规则和行号信息
+    RULE_COUNT=$(echo "$RULES" | awk 'NR % 2 == 1 {count++} END {print count}')
+    
+    if [ "$RULE_COUNT" -eq 0 ]; then
+        echo "没有找到转发规则"
+        return
+    fi
+    
+    # 将规则和行号信息分开
+    DISPLAY_RULES=$(echo "$RULES" | awk 'NR % 2 == 1 {print}')
+    RULE_LINES=$(echo "$RULES" | awk 'NR % 2 == 0 {print}')
     
     # 显示规则供用户选择
-    tail -n +$((RULES_COUNT+1)) "$TEMP_RULES" | nl -v 0
-    
+    echo "$DISPLAY_RULES"
     echo "------------------------------------"
-    read -p "请输入要删除的规则序号 [0-$((RULES_COUNT-1))]: " RULE_NUM
+    
+    # 用户选择
+    read -p "请输入要删除的规则序号 [0-$((RULE_COUNT-1))]: " RULE_NUM
     
     # 验证输入
-    if ! [[ "$RULE_NUM" =~ ^[0-9]+$ ]] || [ "$RULE_NUM" -ge "$RULES_COUNT" ]; then
+    if ! [[ "$RULE_NUM" =~ ^[0-9]+$ ]] || [ "$RULE_NUM" -ge "$RULE_COUNT" ]; then
         echo -e "${RED}无效的规则序号${NC}"
-        rm -f "$TEMP_RULES"
         return
     fi
     
-    # 获取要删除的规则的位置
-    RULE_POS=$(echo "$RULE_POSITIONS" | sed -n "$((RULE_NUM+1))p")
+    # 获取所选规则的行号
+    LINE_NUM=$(echo "$RULE_LINES" | sed -n "$((RULE_NUM+1))p")
     
-    # 获取规则的开始和结束行号
-    START_LINE=$(echo "$RULE_POS" | cut -d ":" -f2)
-    END_LINE=$(echo "$RULE_POS" | cut -d ":" -f3)
+    # 找到规则的开始和结束位置
+    START_LINE=$LINE_NUM
+    
+    # 找到下一个规则的开始行或文件结束
+    if [ "$RULE_NUM" -lt "$((RULE_COUNT-1))" ]; then
+        NEXT_LINE=$(echo "$RULE_LINES" | sed -n "$((RULE_NUM+2))p")
+        END_LINE=$((NEXT_LINE-1))
+    else
+        # 如果是最后一条规则，则到文件末尾
+        END_LINE=$(wc -l < "$CONFIG_FILE")
+    fi
     
     # 创建新的配置文件，排除要删除的规则
     TEMP_CONFIG=$(mktemp)
@@ -789,9 +773,8 @@ delete_forwarding() {
     fi
     
     # 写入删除行之后的内容
-    TOTAL_LINES=$(wc -l < "$CONFIG_FILE")
-    if [ "$END_LINE" -lt "$TOTAL_LINES" ]; then
-        tail -n $((TOTAL_LINES-END_LINE)) "$CONFIG_FILE" >> "$TEMP_CONFIG"
+    if [ "$END_LINE" -lt "$(wc -l < "$CONFIG_FILE")" ]; then
+        tail -n $(($(wc -l < "$CONFIG_FILE") - END_LINE)) "$CONFIG_FILE" >> "$TEMP_CONFIG"
     fi
     
     # 备份原配置
@@ -801,9 +784,6 @@ delete_forwarding() {
     mv "$TEMP_CONFIG" "$CONFIG_FILE"
     
     echo -e "${GREEN}已删除规则序号 $RULE_NUM${NC}"
-    
-    # 清理临时文件
-    rm -f "$TEMP_RULES"
     
     # 重启服务
     if systemctl is-active --quiet realm; then
@@ -1119,43 +1099,38 @@ show_current_rules() {
     echo "------------------------------------"
     
     # 提取并显示每个转发规则
-    ENDPOINTS_COUNT=$(grep -c "\[\[endpoints\]\]" "$CONFIG_FILE")
-    
-    if [ "$ENDPOINTS_COUNT" -eq 0 ]; then
-        echo "没有找到转发规则，使用 'realm-x -a' 添加规则"
-    else
-        # 临时文件处理规则显示
-        TEMP_FILE=$(mktemp)
-        awk '
-        BEGIN { count = 0; }
-        /\[\[endpoints\]\]/ { 
-            if (listen != "" && remote != "") {
-                if (transport != "") {
-                    print "转发规则 " count ": " listen " -> " remote " (加密: " transport ")";
-                } else {
-                    print "转发规则 " count ": " listen " -> " remote;
-                }
-                listen = ""; remote = ""; transport = "";
-            }
-            count++; 
+    RULES=$(awk '
+    BEGIN { count = 0; }
+    /\[\[endpoints\]\]/ { 
+      count++;
+    }
+    /listen =/ { 
+      gsub(/"/, "", $3);
+      listen[count-1] = $3;
+    }
+    /remote =/ { 
+      gsub(/"/, "", $3);
+      remote[count-1] = $3;
+    }
+    /remote_transport =/ { 
+      gsub(/"/, "", $3);
+      transport[count-1] = $3;
+    }
+    END {
+      if (count == 0) {
+        print "没有找到转发规则，使用 \"realm-x -a\" 添加规则";
+      } else {
+        for (i = 0; i < count; i++) {
+          if (transport[i]) {
+            print i " : " listen[i] " -> " remote[i] " (加密: " transport[i] ")";
+          } else {
+            print i " : " listen[i] " -> " remote[i];
+          }
         }
-        /listen =/ { gsub(/"/, "", $3); listen = $3; }
-        /remote =/ { gsub(/"/, "", $3); remote = $3; }
-        /remote_transport =/ { gsub(/"/, "", $3); transport = $3; }
-        END {
-            if (listen != "" && remote != "") {
-                if (transport != "") {
-                    print "转发规则 " count ": " listen " -> " remote " (加密: " transport ")";
-                } else {
-                    print "转发规则 " count ": " listen " -> " remote;
-                }
-            }
-        }' "$CONFIG_FILE" > "$TEMP_FILE"
-        
-        cat "$TEMP_FILE"
-        rm -f "$TEMP_FILE"
-    fi
+      }
+    }' "$CONFIG_FILE")
     
+    echo "$RULES"
     echo "------------------------------------"
 }
 
@@ -1402,179 +1377,39 @@ show_current_rules() {
     echo "------------------------------------"
     
     # 提取并显示每个转发规则
-    ENDPOINTS_COUNT=$(grep -c "\[\[endpoints\]\]" "$CONFIG_FILE")
-    
-    if [ "$ENDPOINTS_COUNT" -eq 0 ]; then
-        echo "没有找到转发规则，使用 'realm-x -a' 添加规则"
-    else
-        # 临时文件处理规则显示
-        TEMP_FILE=$(mktemp)
-        awk '
-        BEGIN { count = 0; }
-        /\[\[endpoints\]\]/ { 
-            if (listen != "" && remote != "") {
-                if (transport != "") {
-                    print "转发规则 " count ": " listen " -> " remote " (加密: " transport ")";
-                } else {
-                    print "转发规则 " count ": " listen " -> " remote;
-                }
-                listen = ""; remote = ""; transport = "";
-            }
-            count++; 
-        }
-        /listen =/ { gsub(/"/, "", $3); listen = $3; }
-        /remote =/ { gsub(/"/, "", $3); remote = $3; }
-        /remote_transport =/ { gsub(/"/, "", $3); transport = $3; }
-        END {
-            if (listen != "" && remote != "") {
-                if (transport != "") {
-                    print "转发规则 " count ": " listen " -> " remote " (加密: " transport ")";
-                } else {
-                    print "转发规则 " count ": " listen " -> " remote;
-                }
-            }
-        }' "$CONFIG_FILE" > "$TEMP_FILE"
-        
-        cat "$TEMP_FILE"
-        rm -f "$TEMP_FILE"
-    fi
-    
-    echo "------------------------------------"
-}
-
-# 删除转发规则
-delete_forwarding() {
-    check_root
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${YELLOW}配置文件不存在: $CONFIG_FILE${NC}"
-        return
-    fi
-    
-    # 显示当前规则
-    echo -e "${BLUE}当前转发规则:${NC}"
-    echo "------------------------------------"
-    
-    # 创建临时文件用于存储规则信息
-    TEMP_RULES=$(mktemp)
-    
-    # 提取所有规则
-    awk '
-    BEGIN { count = 0; in_endpoint = 0; endpoint_start = 0; endpoint_end = 0; last_line = 0; }
-    {
-        line[NR] = $0;
-        last_line = NR;
-    }
+    RULES=$(awk '
+    BEGIN { count = 0; }
     /\[\[endpoints\]\]/ { 
-        if (in_endpoint) {
-            endpoint_end = NR - 1;
-            print count ":" endpoint_start ":" endpoint_end;
-        }
-        in_endpoint = 1;
-        endpoint_start = NR;
-        count++;
+      count++;
     }
     /listen =/ { 
-        if (in_endpoint) {
-            gsub(/"/, "", $3);
-            listen[count-1] = $3;
-        }
+      gsub(/"/, "", $3);
+      listen[count-1] = $3;
     }
     /remote =/ { 
-        if (in_endpoint) {
-            gsub(/"/, "", $3);
-            remote[count-1] = $3;
-        }
+      gsub(/"/, "", $3);
+      remote[count-1] = $3;
     }
     /remote_transport =/ { 
-        if (in_endpoint) {
-            gsub(/"/, "", $3);
-            transport[count-1] = $3;
-        }
+      gsub(/"/, "", $3);
+      transport[count-1] = $3;
     }
     END {
-        if (in_endpoint) {
-            endpoint_end = last_line;
-            print count ":" endpoint_start ":" endpoint_end;
-        }
+      if (count == 0) {
+        print "没有找到转发规则，使用 \"realm-x -a\" 添加规则";
+      } else {
         for (i = 0; i < count; i++) {
-            if (transport[i]) {
-                print i ": " listen[i] " -> " remote[i] " (加密: " transport[i] ")";
-            } else {
-                print i ": " listen[i] " -> " remote[i];
-            }
+          if (transport[i]) {
+            print i " : " listen[i] " -> " remote[i] " (加密: " transport[i] ")";
+          } else {
+            print i " : " listen[i] " -> " remote[i];
+          }
         }
-    }' "$CONFIG_FILE" > "$TEMP_RULES"
+      }
+    }' "$CONFIG_FILE")
     
-    # 显示规则列表供用户选择
-    RULES_COUNT=$(grep -c ":" "$TEMP_RULES" | cut -d ":" -f1)
-    
-    if [ "$RULES_COUNT" -eq 0 ]; then
-        echo "没有找到转发规则"
-        rm -f "$TEMP_RULES"
-        return
-    fi
-    
-    # 获取规则位置信息
-    RULE_POSITIONS=$(head -n "$RULES_COUNT" "$TEMP_RULES")
-    
-    # 显示规则供用户选择
-    tail -n +$((RULES_COUNT+1)) "$TEMP_RULES" | nl -v 0
-    
+    echo "$RULES"
     echo "------------------------------------"
-    read -p "请输入要删除的规则序号 [0-$((RULES_COUNT-1))]: " RULE_NUM
-    
-    # 验证输入
-    if ! [[ "$RULE_NUM" =~ ^[0-9]+$ ]] || [ "$RULE_NUM" -ge "$RULES_COUNT" ]; then
-        echo -e "${RED}无效的规则序号${NC}"
-        rm -f "$TEMP_RULES"
-        return
-    fi
-    
-    # 获取要删除的规则的位置
-    RULE_POS=$(echo "$RULE_POSITIONS" | sed -n "$((RULE_NUM+1))p")
-    
-    # 获取规则的开始和结束行号
-    START_LINE=$(echo "$RULE_POS" | cut -d ":" -f2)
-    END_LINE=$(echo "$RULE_POS" | cut -d ":" -f3)
-    
-    # 创建新的配置文件，排除要删除的规则
-    TEMP_CONFIG=$(mktemp)
-    
-    # 写入删除行之前的内容
-    if [ "$START_LINE" -gt 1 ]; then
-        head -n $((START_LINE-1)) "$CONFIG_FILE" > "$TEMP_CONFIG"
-    else
-        # 如果删除的是第一个规则，创建空文件
-        > "$TEMP_CONFIG"
-    fi
-    
-    # 写入删除行之后的内容
-    TOTAL_LINES=$(wc -l < "$CONFIG_FILE")
-    if [ "$END_LINE" -lt "$TOTAL_LINES" ]; then
-        tail -n $((TOTAL_LINES-END_LINE)) "$CONFIG_FILE" >> "$TEMP_CONFIG"
-    fi
-    
-    # 备份原配置
-    cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
-    
-    # 使用新配置替换旧配置
-    mv "$TEMP_CONFIG" "$CONFIG_FILE"
-    
-    echo -e "${GREEN}已删除规则序号 $RULE_NUM${NC}"
-    
-    # 清理临时文件
-    rm -f "$TEMP_RULES"
-    
-    # 重启服务
-    if systemctl is-active --quiet realm; then
-        echo "重启realm服务..."
-        systemctl restart realm
-        echo -e "${GREEN}服务已重启${NC}"
-    else
-        echo "realm服务未运行，正在启动..."
-        systemctl start realm
-        echo -e "${GREEN}服务已启动${NC}"
-    fi
 }
 
 # 编辑配置文件
