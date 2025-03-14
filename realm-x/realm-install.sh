@@ -261,44 +261,37 @@ perform_installation() {
         CONFIG_FILE="$CONFIG_DIR/realm.toml"
     fi
 
-    # 获取用户输入的端口和目标
-    read -p "请输入本地监听端口: " LOCAL_PORT
-    read -p "请输入远程目标地址(IP或域名): " REMOTE_TARGET
-    read -p "请输入远程目标端口: " REMOTE_PORT
+    # 检查配置文件是否已存在
+    if [ ! -f "$CONFIG_FILE" ]; then
+        # 如果不存在配置文件，创建一个基本的配置
+        echo "配置文件不存在，将创建基本配置..."
+        
+        # 创建配置目录
+        if [ -d "$CONFIG_DIR" ] || mkdir -p "$CONFIG_DIR"; then
+            echo "创建配置文件 $CONFIG_FILE"
+            cat > "$CONFIG_FILE" << EOF
+[network]
+no_tcp = false
+use_udp = true
 
-    # 处理IPv6地址
-    if [[ "$REMOTE_TARGET" =~ : ]]; then
-        # 检查是否已经有方括号
-        if [[ ! "$REMOTE_TARGET" =~ ^\[.*\]$ ]]; then
-            REMOTE_TARGET="[$REMOTE_TARGET]"
+# 请使用 'realm-x -a' 添加转发规则
+EOF
+        else
+            echo -e "${YELLOW}无法创建配置目录 $CONFIG_DIR${NC}"
+            CONFIG_DIR="$PWD"
+            CONFIG_FILE="$CONFIG_DIR/realm.toml"
+            cat > "$CONFIG_FILE" << EOF
+[network]
+no_tcp = false
+use_udp = true
+
+# 请使用 'realm-x -a' 添加转发规则
+EOF
         fi
-    fi
-
-    # 创建配置目录
-    if [ -d "$CONFIG_DIR" ] || mkdir -p "$CONFIG_DIR"; then
-        echo "创建配置文件 $CONFIG_FILE"
-        cat > "$CONFIG_FILE" << EOF
-[network]
-no_tcp = false
-use_udp = true
-
-[[endpoints]]
-listen = "0.0.0.0:${LOCAL_PORT}"
-remote = "${REMOTE_TARGET}:${REMOTE_PORT}"
-EOF
+        
+        echo -e "${YELLOW}请在安装完成后使用 'realm-x -a' 命令添加转发规则${NC}"
     else
-        echo -e "${YELLOW}无法创建配置目录 $CONFIG_DIR${NC}"
-        CONFIG_DIR="$PWD"
-        CONFIG_FILE="$CONFIG_DIR/realm.toml"
-        cat > "$CONFIG_FILE" << EOF
-[network]
-no_tcp = false
-use_udp = true
-
-[[endpoints]]
-listen = "0.0.0.0:${LOCAL_PORT}"
-remote = "${REMOTE_TARGET}:${REMOTE_PORT}"
-EOF
+        echo "检测到已存在配置文件，保留现有配置"
     fi
 
     # 创建systemd服务文件
@@ -361,11 +354,10 @@ EOF
     cd - > /dev/null
     rm -rf "$TMP_DIR"
 
-    echo -e "${GREEN}安装完成${NC}"
+    echo -e "${GREEN}Realm 安装完成${NC}"
     echo "二进制文件位置: $REALM_PATH"
     echo "配置文件位置: $CONFIG_FILE"
-    echo "配置概要: 本地监听 0.0.0.0:${LOCAL_PORT} -> 转发到 ${REMOTE_TARGET}:${REMOTE_PORT}"
-    echo -e "${GREEN}您现在可以在任意位置运行 'realm-x' 命令来管理Realm${NC}"
+    echo -e "${GREEN}您现在可以使用 'realm-x -a' 命令添加转发规则${NC}"
 }
 
 # 安装realm-x命令
@@ -638,44 +630,37 @@ perform_installation() {
         CONFIG_FILE="$CONFIG_DIR/realm.toml"
     fi
 
-    # 获取用户输入的端口和目标
-    read -p "请输入本地监听端口: " LOCAL_PORT
-    read -p "请输入远程目标地址(IP或域名): " REMOTE_TARGET
-    read -p "请输入远程目标端口: " REMOTE_PORT
+    # 检查配置文件是否已存在
+    if [ ! -f "$CONFIG_FILE" ]; then
+        # 如果不存在配置文件，创建一个基本的配置
+        echo "配置文件不存在，将创建基本配置..."
+        
+        # 创建配置目录
+        if [ -d "$CONFIG_DIR" ] || mkdir -p "$CONFIG_DIR"; then
+            echo "创建配置文件 $CONFIG_FILE"
+            cat > "$CONFIG_FILE" << EOF
+[network]
+no_tcp = false
+use_udp = true
 
-    # 处理IPv6地址
-    if [[ "$REMOTE_TARGET" =~ : ]]; then
-        # 检查是否已经有方括号
-        if [[ ! "$REMOTE_TARGET" =~ ^\[.*\]$ ]]; then
-            REMOTE_TARGET="[$REMOTE_TARGET]"
+# 请使用 'realm-x -a' 添加转发规则
+EOF
+        else
+            echo -e "${YELLOW}无法创建配置目录 $CONFIG_DIR${NC}"
+            CONFIG_DIR="$PWD"
+            CONFIG_FILE="$CONFIG_DIR/realm.toml"
+            cat > "$CONFIG_FILE" << EOF
+[network]
+no_tcp = false
+use_udp = true
+
+# 请使用 'realm-x -a' 添加转发规则
+EOF
         fi
-    fi
-
-    # 创建配置目录
-    if [ -d "$CONFIG_DIR" ] || mkdir -p "$CONFIG_DIR"; then
-        echo "创建配置文件 $CONFIG_FILE"
-        cat > "$CONFIG_FILE" << EOF
-[network]
-no_tcp = false
-use_udp = true
-
-[[endpoints]]
-listen = "0.0.0.0:${LOCAL_PORT}"
-remote = "${REMOTE_TARGET}:${REMOTE_PORT}"
-EOF
+        
+        echo -e "${YELLOW}请在安装完成后使用 'realm-x -a' 命令添加转发规则${NC}"
     else
-        echo -e "${YELLOW}无法创建配置目录 $CONFIG_DIR${NC}"
-        CONFIG_DIR="$PWD"
-        CONFIG_FILE="$CONFIG_DIR/realm.toml"
-        cat > "$CONFIG_FILE" << EOF
-[network]
-no_tcp = false
-use_udp = true
-
-[[endpoints]]
-listen = "0.0.0.0:${LOCAL_PORT}"
-remote = "${REMOTE_TARGET}:${REMOTE_PORT}"
-EOF
+        echo "检测到已存在配置文件，保留现有配置"
     fi
 
     # 创建systemd服务文件
@@ -735,10 +720,10 @@ EOF
     cd - > /dev/null
     rm -rf "$TMP_DIR"
 
-    echo -e "${GREEN}安装完成${NC}"
+    echo -e "${GREEN}Realm 安装完成${NC}"
     echo "二进制文件位置: $REALM_PATH"
     echo "配置文件位置: $CONFIG_FILE"
-    echo "配置概要: 本地监听 0.0.0.0:${LOCAL_PORT} -> 转发到 ${REMOTE_TARGET}:${REMOTE_PORT}"
+    echo -e "${GREEN}您现在可以使用 'realm-x -a' 命令添加转发规则${NC}"
 }
 
 # 显示已有转发规则
@@ -983,7 +968,13 @@ show_current_rules() {
     echo "------------------------------------"
     
     # 提取并显示每个转发规则
-    awk '/\[\[endpoints\]\]/{p=1} p&&/listen/{listen=$3} p&&/remote/{remote=$3; print "本地: " listen " -> 远程: " remote; p=0}' "$CONFIG_FILE" | sed 's/"//g'
+    RULES=$(awk '/\[\[endpoints\]\]/{p=1} p&&/listen/{listen=$3} p&&/remote/{remote=$3; print "本地: " listen " -> 远程: " remote; p=0}' "$CONFIG_FILE" | sed 's/"//g')
+    
+    if [ -z "$RULES" ]; then
+        echo "没有找到转发规则，使用 'realm-x -a' 添加规则"
+    else
+        echo "$RULES"
+    fi
     
     echo "------------------------------------"
 }
