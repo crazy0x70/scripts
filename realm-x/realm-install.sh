@@ -49,10 +49,60 @@ add_new_forwarding() {
         fi
     fi
 
-    # 添加新的endpoint配置
-    echo -e "\n[[endpoints]]\nlisten = \"0.0.0.0:${LOCAL_PORT}\"\nremote = \"${REMOTE_TARGET}:${REMOTE_PORT}\"" >> "$CONFIG_FILE"
+    # 询问是否配置加密隧道
+    read -p "是否配置加密隧道? (y/n): " USE_ENCRYPTION
+    ENCRYPTION_CONFIG=""
     
-    echo -e "${GREEN}已添加新的转发规则: 0.0.0.0:${LOCAL_PORT} -> ${REMOTE_TARGET}:${REMOTE_PORT}${NC}"
+    if [[ "$USE_ENCRYPTION" =~ ^[Yy]$ ]]; then
+        echo -e "${BLUE}请选择加密隧道类型:${NC}"
+        echo "1. TLS"
+        echo "2. WebSocket (WS)"
+        echo "3. WebSocket + TLS (WSS)"
+        read -p "请选择 [1-3]: " ENCRYPTION_TYPE
+        
+        case $ENCRYPTION_TYPE in
+            1) # TLS
+                read -p "请输入 SNI 域名: " SNI_DOMAIN
+                ENCRYPTION_CONFIG="tls;sni=$SNI_DOMAIN;insecure"
+                ;;
+            2) # WS
+                read -p "请输入 Host 域名: " WS_HOST
+                read -p "请输入 Path (默认为/wechat): " WS_PATH
+                if [ -z "$WS_PATH" ]; then
+                    WS_PATH="/wechat"
+                fi
+                ENCRYPTION_CONFIG="ws;host=$WS_HOST;path=$WS_PATH"
+                ;;
+            3) # WSS
+                read -p "是否开启 insecure 选项? (y/n): " USE_INSECURE
+                read -p "请输入 Host 域名: " WS_HOST
+                read -p "请输入 Path (默认为/wechat): " WS_PATH
+                read -p "请输入 SNI 域名: " SNI_DOMAIN
+                
+                if [ -z "$WS_PATH" ]; then
+                    WS_PATH="/wechat"
+                fi
+                
+                if [[ "$USE_INSECURE" =~ ^[Yy]$ ]]; then
+                    ENCRYPTION_CONFIG="ws;host=$WS_HOST;path=$WS_PATH;tls;sni=$SNI_DOMAIN;insecure"
+                else
+                    ENCRYPTION_CONFIG="ws;host=$WS_HOST;path=$WS_PATH;tls;servername=$SNI_DOMAIN"
+                fi
+                ;;
+            *)
+                echo -e "${RED}无效的选择，将不使用加密隧道${NC}"
+                ;;
+        esac
+    fi
+
+    # 添加新的endpoint配置
+    if [ -n "$ENCRYPTION_CONFIG" ]; then
+        echo -e "\n[[endpoints]]\nlisten = \"0.0.0.0:${LOCAL_PORT}\"\nremote = \"${REMOTE_TARGET}:${REMOTE_PORT}\"\nremote_transport = \"${ENCRYPTION_CONFIG}\"" >> "$CONFIG_FILE"
+        echo -e "${GREEN}已添加新的加密转发规则: 0.0.0.0:${LOCAL_PORT} -> ${REMOTE_TARGET}:${REMOTE_PORT} (加密类型: ${ENCRYPTION_CONFIG})${NC}"
+    else
+        echo -e "\n[[endpoints]]\nlisten = \"0.0.0.0:${LOCAL_PORT}\"\nremote = \"${REMOTE_TARGET}:${REMOTE_PORT}\"" >> "$CONFIG_FILE"
+        echo -e "${GREEN}已添加新的转发规则: 0.0.0.0:${LOCAL_PORT} -> ${REMOTE_TARGET}:${REMOTE_PORT}${NC}"
+    fi
     
     # 重启服务
     if systemctl is-active --quiet realm; then
@@ -418,10 +468,60 @@ add_new_forwarding() {
         fi
     fi
 
-    # 添加新的endpoint配置
-    echo -e "\n[[endpoints]]\nlisten = \"0.0.0.0:${LOCAL_PORT}\"\nremote = \"${REMOTE_TARGET}:${REMOTE_PORT}\"" >> "$CONFIG_FILE"
+    # 询问是否配置加密隧道
+    read -p "是否配置加密隧道? (y/n): " USE_ENCRYPTION
+    ENCRYPTION_CONFIG=""
     
-    echo -e "${GREEN}已添加新的转发规则: 0.0.0.0:${LOCAL_PORT} -> ${REMOTE_TARGET}:${REMOTE_PORT}${NC}"
+    if [[ "$USE_ENCRYPTION" =~ ^[Yy]$ ]]; then
+        echo -e "${BLUE}请选择加密隧道类型:${NC}"
+        echo "1. TLS"
+        echo "2. WebSocket (WS)"
+        echo "3. WebSocket + TLS (WSS)"
+        read -p "请选择 [1-3]: " ENCRYPTION_TYPE
+        
+        case $ENCRYPTION_TYPE in
+            1) # TLS
+                read -p "请输入 SNI 域名: " SNI_DOMAIN
+                ENCRYPTION_CONFIG="tls;sni=$SNI_DOMAIN;insecure"
+                ;;
+            2) # WS
+                read -p "请输入 Host 域名: " WS_HOST
+                read -p "请输入 Path (默认为/wechat): " WS_PATH
+                if [ -z "$WS_PATH" ]; then
+                    WS_PATH="/wechat"
+                fi
+                ENCRYPTION_CONFIG="ws;host=$WS_HOST;path=$WS_PATH"
+                ;;
+            3) # WSS
+                read -p "是否开启 insecure 选项? (y/n): " USE_INSECURE
+                read -p "请输入 Host 域名: " WS_HOST
+                read -p "请输入 Path (默认为/wechat): " WS_PATH
+                read -p "请输入 SNI 域名: " SNI_DOMAIN
+                
+                if [ -z "$WS_PATH" ]; then
+                    WS_PATH="/wechat"
+                fi
+                
+                if [[ "$USE_INSECURE" =~ ^[Yy]$ ]]; then
+                    ENCRYPTION_CONFIG="ws;host=$WS_HOST;path=$WS_PATH;tls;sni=$SNI_DOMAIN;insecure"
+                else
+                    ENCRYPTION_CONFIG="ws;host=$WS_HOST;path=$WS_PATH;tls;servername=$SNI_DOMAIN"
+                fi
+                ;;
+            *)
+                echo -e "${RED}无效的选择，将不使用加密隧道${NC}"
+                ;;
+        esac
+    fi
+
+    # 添加新的endpoint配置
+    if [ -n "$ENCRYPTION_CONFIG" ]; then
+        echo -e "\n[[endpoints]]\nlisten = \"0.0.0.0:${LOCAL_PORT}\"\nremote = \"${REMOTE_TARGET}:${REMOTE_PORT}\"\nremote_transport = \"${ENCRYPTION_CONFIG}\"" >> "$CONFIG_FILE"
+        echo -e "${GREEN}已添加新的加密转发规则: 0.0.0.0:${LOCAL_PORT} -> ${REMOTE_TARGET}:${REMOTE_PORT} (加密类型: ${ENCRYPTION_CONFIG})${NC}"
+    else
+        echo -e "\n[[endpoints]]\nlisten = \"0.0.0.0:${LOCAL_PORT}\"\nremote = \"${REMOTE_TARGET}:${REMOTE_PORT}\"" >> "$CONFIG_FILE"
+        echo -e "${GREEN}已添加新的转发规则: 0.0.0.0:${LOCAL_PORT} -> ${REMOTE_TARGET}:${REMOTE_PORT}${NC}"
+    fi
     
     # 重启服务
     if systemctl is-active --quiet realm; then
@@ -737,7 +837,42 @@ show_current_rules() {
     echo "------------------------------------"
     
     # 提取并显示每个转发规则
-    awk '/\[\[endpoints\]\]/{p=1} p&&/listen/{listen=$3} p&&/remote/{remote=$3; print "本地: " listen " -> 远程: " remote; p=0}' "$CONFIG_FILE" | sed 's/"//g'
+    ENDPOINTS_COUNT=$(grep -c "\[\[endpoints\]\]" "$CONFIG_FILE")
+    
+    if [ "$ENDPOINTS_COUNT" -eq 0 ]; then
+        echo "没有找到转发规则，使用 'realm-x -a' 添加规则"
+    else
+        # 临时文件处理规则显示
+        TEMP_FILE=$(mktemp)
+        awk '
+        BEGIN { count = 0; }
+        /\[\[endpoints\]\]/ { 
+            if (listen != "" && remote != "") {
+                if (transport != "") {
+                    print "转发规则 " count ": " listen " -> " remote " (加密: " transport ")";
+                } else {
+                    print "转发规则 " count ": " listen " -> " remote;
+                }
+                listen = ""; remote = ""; transport = "";
+            }
+            count++; 
+        }
+        /listen =/ { gsub(/"/, "", $3); listen = $3; }
+        /remote =/ { gsub(/"/, "", $3); remote = $3; }
+        /remote_transport =/ { gsub(/"/, "", $3); transport = $3; }
+        END {
+            if (listen != "" && remote != "") {
+                if (transport != "") {
+                    print "转发规则 " count ": " listen " -> " remote " (加密: " transport ")";
+                } else {
+                    print "转发规则 " count ": " listen " -> " remote;
+                }
+            }
+        }' "$CONFIG_FILE" > "$TEMP_FILE"
+        
+        cat "$TEMP_FILE"
+        rm -f "$TEMP_FILE"
+    fi
     
     echo "------------------------------------"
 }
@@ -968,12 +1103,41 @@ show_current_rules() {
     echo "------------------------------------"
     
     # 提取并显示每个转发规则
-    RULES=$(awk '/\[\[endpoints\]\]/{p=1} p&&/listen/{listen=$3} p&&/remote/{remote=$3; print "本地: " listen " -> 远程: " remote; p=0}' "$CONFIG_FILE" | sed 's/"//g')
+    ENDPOINTS_COUNT=$(grep -c "\[\[endpoints\]\]" "$CONFIG_FILE")
     
-    if [ -z "$RULES" ]; then
+    if [ "$ENDPOINTS_COUNT" -eq 0 ]; then
         echo "没有找到转发规则，使用 'realm-x -a' 添加规则"
     else
-        echo "$RULES"
+        # 临时文件处理规则显示
+        TEMP_FILE=$(mktemp)
+        awk '
+        BEGIN { count = 0; }
+        /\[\[endpoints\]\]/ { 
+            if (listen != "" && remote != "") {
+                if (transport != "") {
+                    print "转发规则 " count ": " listen " -> " remote " (加密: " transport ")";
+                } else {
+                    print "转发规则 " count ": " listen " -> " remote;
+                }
+                listen = ""; remote = ""; transport = "";
+            }
+            count++; 
+        }
+        /listen =/ { gsub(/"/, "", $3); listen = $3; }
+        /remote =/ { gsub(/"/, "", $3); remote = $3; }
+        /remote_transport =/ { gsub(/"/, "", $3); transport = $3; }
+        END {
+            if (listen != "" && remote != "") {
+                if (transport != "") {
+                    print "转发规则 " count ": " listen " -> " remote " (加密: " transport ")";
+                } else {
+                    print "转发规则 " count ": " listen " -> " remote;
+                }
+            }
+        }' "$CONFIG_FILE" > "$TEMP_FILE"
+        
+        cat "$TEMP_FILE"
+        rm -f "$TEMP_FILE"
     fi
     
     echo "------------------------------------"
