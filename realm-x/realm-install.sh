@@ -63,7 +63,13 @@ add_new_forwarding() {
         case $ENCRYPTION_TYPE in
             1) # TLS
                 read -p "请输入 SNI 域名: " SNI_DOMAIN
-                ENCRYPTION_CONFIG="tls;sni=$SNI_DOMAIN;insecure"
+                read -p "是否开启 insecure 选项? (y/n): " USE_INSECURE
+                
+                if [[ "$USE_INSECURE" =~ ^[Yy]$ ]]; then
+                    ENCRYPTION_CONFIG="tls;sni=$SNI_DOMAIN;insecure"
+                else
+                    ENCRYPTION_CONFIG="tls;servername=$SNI_DOMAIN"
+                fi
                 ;;
             2) # WS
                 read -p "请输入 Host 域名: " WS_HOST
@@ -103,6 +109,141 @@ add_new_forwarding() {
         echo -e "\n[[endpoints]]\nlisten = \"0.0.0.0:${LOCAL_PORT}\"\nremote = \"${REMOTE_TARGET}:${REMOTE_PORT}\"" >> "$CONFIG_FILE"
         echo -e "${GREEN}已添加新的转发规则: 0.0.0.0:${LOCAL_PORT} -> ${REMOTE_TARGET}:${REMOTE_PORT}${NC}"
     fi
+    
+    # 重启服务
+    if systemctl is-active --quiet realm; then
+        echo "重启realm服务..."
+        systemctl restart realm
+        echo -e "${GREEN}服务已重启${NC}"
+    else
+        echo "realm服务未运行，正在启动..."
+        systemctl start realm
+        echo -e "${GREEN}服务已启动${NC}"
+    fi
+}
+
+# 删除转发规则
+delete_forwarding() {
+    check_root
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${YELLOW}配置文件不存在: $CONFIG_FILE${NC}"
+        return
+    fi
+    
+    # 显示当前规则
+    echo -e "${BLUE}当前转发规则:${NC}"
+    echo "------------------------------------"
+    
+    # 创建临时文件用于存储规则信息
+    TEMP_RULES=$(mktemp)
+    
+    # 提取所有规则
+    awk '
+    BEGIN { count = 0; in_endpoint = 0; endpoint_start = 0; endpoint_end = 0; last_line = 0; }
+    {
+        line[NR] = $0;
+        last_line = NR;
+    }
+    /\[\[endpoints\]\]/ { 
+        if (in_endpoint) {
+            endpoint_end = NR - 1;
+            print count ":" endpoint_start ":" endpoint_end;
+        }
+        in_endpoint = 1;
+        endpoint_start = NR;
+        count++;
+    }
+    /listen =/ { 
+        if (in_endpoint) {
+            gsub(/"/, "", $3);
+            listen[count-1] = $3;
+        }
+    }
+    /remote =/ { 
+        if (in_endpoint) {
+            gsub(/"/, "", $3);
+            remote[count-1] = $3;
+        }
+    }
+    /remote_transport =/ { 
+        if (in_endpoint) {
+            gsub(/"/, "", $3);
+            transport[count-1] = $3;
+        }
+    }
+    END {
+        if (in_endpoint) {
+            endpoint_end = last_line;
+            print count ":" endpoint_start ":" endpoint_end;
+        }
+        for (i = 0; i < count; i++) {
+            if (transport[i]) {
+                print i ": " listen[i] " -> " remote[i] " (加密: " transport[i] ")";
+            } else {
+                print i ": " listen[i] " -> " remote[i];
+            }
+        }
+    }' "$CONFIG_FILE" > "$TEMP_RULES"
+    
+    # 显示规则列表供用户选择
+    RULES_COUNT=$(grep -c ":" "$TEMP_RULES" | cut -d ":" -f1)
+    
+    if [ "$RULES_COUNT" -eq 0 ]; then
+        echo "没有找到转发规则"
+        rm -f "$TEMP_RULES"
+        return
+    fi
+    
+    # 获取规则位置信息
+    RULE_POSITIONS=$(head -n "$RULES_COUNT" "$TEMP_RULES")
+    
+    # 显示规则供用户选择
+    tail -n +$((RULES_COUNT+1)) "$TEMP_RULES" | nl -v 0
+    
+    echo "------------------------------------"
+    read -p "请输入要删除的规则序号 [0-$((RULES_COUNT-1))]: " RULE_NUM
+    
+    # 验证输入
+    if ! [[ "$RULE_NUM" =~ ^[0-9]+$ ]] || [ "$RULE_NUM" -ge "$RULES_COUNT" ]; then
+        echo -e "${RED}无效的规则序号${NC}"
+        rm -f "$TEMP_RULES"
+        return
+    fi
+    
+    # 获取要删除的规则的位置
+    RULE_POS=$(echo "$RULE_POSITIONS" | sed -n "$((RULE_NUM+1))p")
+    
+    # 获取规则的开始和结束行号
+    START_LINE=$(echo "$RULE_POS" | cut -d ":" -f2)
+    END_LINE=$(echo "$RULE_POS" | cut -d ":" -f3)
+    
+    # 创建新的配置文件，排除要删除的规则
+    TEMP_CONFIG=$(mktemp)
+    
+    # 写入删除行之前的内容
+    if [ "$START_LINE" -gt 1 ]; then
+        head -n $((START_LINE-1)) "$CONFIG_FILE" > "$TEMP_CONFIG"
+    else
+        # 如果删除的是第一个规则，创建空文件
+        > "$TEMP_CONFIG"
+    fi
+    
+    # 写入删除行之后的内容
+    TOTAL_LINES=$(wc -l < "$CONFIG_FILE")
+    if [ "$END_LINE" -lt "$TOTAL_LINES" ]; then
+        tail -n $((TOTAL_LINES-END_LINE)) "$CONFIG_FILE" >> "$TEMP_CONFIG"
+    fi
+    
+    # 备份原配置
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+    
+    # 使用新配置替换旧配置
+    mv "$TEMP_CONFIG" "$CONFIG_FILE"
+    
+    echo -e "${GREEN}已删除规则序号 $RULE_NUM${NC}"
+    
+    # 清理临时文件
+    rm -f "$TEMP_RULES"
     
     # 重启服务
     if systemctl is-active --quiet realm; then
@@ -482,7 +623,13 @@ add_new_forwarding() {
         case $ENCRYPTION_TYPE in
             1) # TLS
                 read -p "请输入 SNI 域名: " SNI_DOMAIN
-                ENCRYPTION_CONFIG="tls;sni=$SNI_DOMAIN;insecure"
+                read -p "是否开启 insecure 选项? (y/n): " USE_INSECURE
+                
+                if [[ "$USE_INSECURE" =~ ^[Yy]$ ]]; then
+                    ENCRYPTION_CONFIG="tls;sni=$SNI_DOMAIN;insecure"
+                else
+                    ENCRYPTION_CONFIG="tls;servername=$SNI_DOMAIN"
+                fi
                 ;;
             2) # WS
                 read -p "请输入 Host 域名: " WS_HOST
@@ -522,6 +669,141 @@ add_new_forwarding() {
         echo -e "\n[[endpoints]]\nlisten = \"0.0.0.0:${LOCAL_PORT}\"\nremote = \"${REMOTE_TARGET}:${REMOTE_PORT}\"" >> "$CONFIG_FILE"
         echo -e "${GREEN}已添加新的转发规则: 0.0.0.0:${LOCAL_PORT} -> ${REMOTE_TARGET}:${REMOTE_PORT}${NC}"
     fi
+    
+    # 重启服务
+    if systemctl is-active --quiet realm; then
+        echo "重启realm服务..."
+        systemctl restart realm
+        echo -e "${GREEN}服务已重启${NC}"
+    else
+        echo "realm服务未运行，正在启动..."
+        systemctl start realm
+        echo -e "${GREEN}服务已启动${NC}"
+    fi
+}
+
+# 删除转发规则
+delete_forwarding() {
+    check_root
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${YELLOW}配置文件不存在: $CONFIG_FILE${NC}"
+        return
+    fi
+    
+    # 显示当前规则
+    echo -e "${BLUE}当前转发规则:${NC}"
+    echo "------------------------------------"
+    
+    # 创建临时文件用于存储规则信息
+    TEMP_RULES=$(mktemp)
+    
+    # 提取所有规则
+    awk '
+    BEGIN { count = 0; in_endpoint = 0; endpoint_start = 0; endpoint_end = 0; last_line = 0; }
+    {
+        line[NR] = $0;
+        last_line = NR;
+    }
+    /\[\[endpoints\]\]/ { 
+        if (in_endpoint) {
+            endpoint_end = NR - 1;
+            print count ":" endpoint_start ":" endpoint_end;
+        }
+        in_endpoint = 1;
+        endpoint_start = NR;
+        count++;
+    }
+    /listen =/ { 
+        if (in_endpoint) {
+            gsub(/"/, "", $3);
+            listen[count-1] = $3;
+        }
+    }
+    /remote =/ { 
+        if (in_endpoint) {
+            gsub(/"/, "", $3);
+            remote[count-1] = $3;
+        }
+    }
+    /remote_transport =/ { 
+        if (in_endpoint) {
+            gsub(/"/, "", $3);
+            transport[count-1] = $3;
+        }
+    }
+    END {
+        if (in_endpoint) {
+            endpoint_end = last_line;
+            print count ":" endpoint_start ":" endpoint_end;
+        }
+        for (i = 0; i < count; i++) {
+            if (transport[i]) {
+                print i ": " listen[i] " -> " remote[i] " (加密: " transport[i] ")";
+            } else {
+                print i ": " listen[i] " -> " remote[i];
+            }
+        }
+    }' "$CONFIG_FILE" > "$TEMP_RULES"
+    
+    # 显示规则列表供用户选择
+    RULES_COUNT=$(grep -c ":" "$TEMP_RULES" | cut -d ":" -f1)
+    
+    if [ "$RULES_COUNT" -eq 0 ]; then
+        echo "没有找到转发规则"
+        rm -f "$TEMP_RULES"
+        return
+    fi
+    
+    # 获取规则位置信息
+    RULE_POSITIONS=$(head -n "$RULES_COUNT" "$TEMP_RULES")
+    
+    # 显示规则供用户选择
+    tail -n +$((RULES_COUNT+1)) "$TEMP_RULES" | nl -v 0
+    
+    echo "------------------------------------"
+    read -p "请输入要删除的规则序号 [0-$((RULES_COUNT-1))]: " RULE_NUM
+    
+    # 验证输入
+    if ! [[ "$RULE_NUM" =~ ^[0-9]+$ ]] || [ "$RULE_NUM" -ge "$RULES_COUNT" ]; then
+        echo -e "${RED}无效的规则序号${NC}"
+        rm -f "$TEMP_RULES"
+        return
+    fi
+    
+    # 获取要删除的规则的位置
+    RULE_POS=$(echo "$RULE_POSITIONS" | sed -n "$((RULE_NUM+1))p")
+    
+    # 获取规则的开始和结束行号
+    START_LINE=$(echo "$RULE_POS" | cut -d ":" -f2)
+    END_LINE=$(echo "$RULE_POS" | cut -d ":" -f3)
+    
+    # 创建新的配置文件，排除要删除的规则
+    TEMP_CONFIG=$(mktemp)
+    
+    # 写入删除行之前的内容
+    if [ "$START_LINE" -gt 1 ]; then
+        head -n $((START_LINE-1)) "$CONFIG_FILE" > "$TEMP_CONFIG"
+    else
+        # 如果删除的是第一个规则，创建空文件
+        > "$TEMP_CONFIG"
+    fi
+    
+    # 写入删除行之后的内容
+    TOTAL_LINES=$(wc -l < "$CONFIG_FILE")
+    if [ "$END_LINE" -lt "$TOTAL_LINES" ]; then
+        tail -n $((TOTAL_LINES-END_LINE)) "$CONFIG_FILE" >> "$TEMP_CONFIG"
+    fi
+    
+    # 备份原配置
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+    
+    # 使用新配置替换旧配置
+    mv "$TEMP_CONFIG" "$CONFIG_FILE"
+    
+    echo -e "${GREEN}已删除规则序号 $RULE_NUM${NC}"
+    
+    # 清理临时文件
+    rm -f "$TEMP_RULES"
     
     # 重启服务
     if systemctl is-active --quiet realm; then
@@ -923,6 +1205,7 @@ show_help() {
     echo "  -r, --restart    重启Realm服务"
     echo "  -l, --list       列出当前转发规则"
     echo "  -a, --add        添加新的转发规则"
+    echo "  -d, --delete     删除转发规则"
     echo "  -e, --edit       编辑配置文件"
     echo "  -u, --uninstall  卸载Realm"
     echo ""
@@ -936,13 +1219,14 @@ main_menu() {
     echo "1. 安装或更新 Realm"
     echo "2. 显示当前转发规则"
     echo "3. 添加新的转发规则"
-    echo "4. 编辑配置文件"
-    echo "5. 重启 Realm 服务"
-    echo "6. 查看 Realm 状态"
-    echo "7. 卸载 Realm"
-    echo "8. 退出"
+    echo "4. 删除转发规则"
+    echo "5. 编辑配置文件"
+    echo "6. 重启 Realm 服务"
+    echo "7. 查看 Realm 状态"
+    echo "8. 卸载 Realm"
+    echo "9. 退出"
     echo -e "${BLUE}===========================${NC}"
-    read -p "请选择操作 [1-8]: " choice
+    read -p "请选择操作 [1-9]: " choice
     
     case $choice in
         1)
@@ -960,12 +1244,19 @@ main_menu() {
             ;;
         4)
             if check_installation; then
-                edit_config
+                delete_forwarding
             else
                 echo -e "${YELLOW}Realm 尚未安装，请先选择选项 1 进行安装${NC}"
             fi
             ;;
         5)
+            if check_installation; then
+                edit_config
+            else
+                echo -e "${YELLOW}Realm 尚未安装，请先选择选项 1 进行安装${NC}"
+            fi
+            ;;
+        6)
             check_root
             if systemctl list-unit-files | grep -q realm.service; then
                 echo "重启 Realm 服务..."
@@ -975,14 +1266,14 @@ main_menu() {
                 echo -e "${YELLOW}Realm 服务未安装${NC}"
             fi
             ;;
-        6)
+        7)
             if systemctl list-unit-files | grep -q realm.service; then
                 systemctl status realm
             else
                 echo -e "${YELLOW}Realm 服务未安装${NC}"
             fi
             ;;
-        7)
+        8)
             if check_installation; then
                 read -p "确定要卸载 Realm 吗? (y/n): " confirm
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -994,7 +1285,7 @@ main_menu() {
                 echo -e "${YELLOW}Realm 尚未安装${NC}"
             fi
             ;;
-        8)
+        9)
             echo "退出脚本"
             exit 0
             ;;
@@ -1044,6 +1335,14 @@ parse_args() {
         -a|--add)
             if check_installation; then
                 add_new_forwarding
+            else
+                echo -e "${YELLOW}Realm 尚未安装，请先安装${NC}"
+            fi
+            exit 0
+            ;;
+        -d|--delete)
+            if check_installation; then
+                delete_forwarding
             else
                 echo -e "${YELLOW}Realm 尚未安装，请先安装${NC}"
             fi
@@ -1143,6 +1442,141 @@ show_current_rules() {
     echo "------------------------------------"
 }
 
+# 删除转发规则
+delete_forwarding() {
+    check_root
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${YELLOW}配置文件不存在: $CONFIG_FILE${NC}"
+        return
+    fi
+    
+    # 显示当前规则
+    echo -e "${BLUE}当前转发规则:${NC}"
+    echo "------------------------------------"
+    
+    # 创建临时文件用于存储规则信息
+    TEMP_RULES=$(mktemp)
+    
+    # 提取所有规则
+    awk '
+    BEGIN { count = 0; in_endpoint = 0; endpoint_start = 0; endpoint_end = 0; last_line = 0; }
+    {
+        line[NR] = $0;
+        last_line = NR;
+    }
+    /\[\[endpoints\]\]/ { 
+        if (in_endpoint) {
+            endpoint_end = NR - 1;
+            print count ":" endpoint_start ":" endpoint_end;
+        }
+        in_endpoint = 1;
+        endpoint_start = NR;
+        count++;
+    }
+    /listen =/ { 
+        if (in_endpoint) {
+            gsub(/"/, "", $3);
+            listen[count-1] = $3;
+        }
+    }
+    /remote =/ { 
+        if (in_endpoint) {
+            gsub(/"/, "", $3);
+            remote[count-1] = $3;
+        }
+    }
+    /remote_transport =/ { 
+        if (in_endpoint) {
+            gsub(/"/, "", $3);
+            transport[count-1] = $3;
+        }
+    }
+    END {
+        if (in_endpoint) {
+            endpoint_end = last_line;
+            print count ":" endpoint_start ":" endpoint_end;
+        }
+        for (i = 0; i < count; i++) {
+            if (transport[i]) {
+                print i ": " listen[i] " -> " remote[i] " (加密: " transport[i] ")";
+            } else {
+                print i ": " listen[i] " -> " remote[i];
+            }
+        }
+    }' "$CONFIG_FILE" > "$TEMP_RULES"
+    
+    # 显示规则列表供用户选择
+    RULES_COUNT=$(grep -c ":" "$TEMP_RULES" | cut -d ":" -f1)
+    
+    if [ "$RULES_COUNT" -eq 0 ]; then
+        echo "没有找到转发规则"
+        rm -f "$TEMP_RULES"
+        return
+    fi
+    
+    # 获取规则位置信息
+    RULE_POSITIONS=$(head -n "$RULES_COUNT" "$TEMP_RULES")
+    
+    # 显示规则供用户选择
+    tail -n +$((RULES_COUNT+1)) "$TEMP_RULES" | nl -v 0
+    
+    echo "------------------------------------"
+    read -p "请输入要删除的规则序号 [0-$((RULES_COUNT-1))]: " RULE_NUM
+    
+    # 验证输入
+    if ! [[ "$RULE_NUM" =~ ^[0-9]+$ ]] || [ "$RULE_NUM" -ge "$RULES_COUNT" ]; then
+        echo -e "${RED}无效的规则序号${NC}"
+        rm -f "$TEMP_RULES"
+        return
+    fi
+    
+    # 获取要删除的规则的位置
+    RULE_POS=$(echo "$RULE_POSITIONS" | sed -n "$((RULE_NUM+1))p")
+    
+    # 获取规则的开始和结束行号
+    START_LINE=$(echo "$RULE_POS" | cut -d ":" -f2)
+    END_LINE=$(echo "$RULE_POS" | cut -d ":" -f3)
+    
+    # 创建新的配置文件，排除要删除的规则
+    TEMP_CONFIG=$(mktemp)
+    
+    # 写入删除行之前的内容
+    if [ "$START_LINE" -gt 1 ]; then
+        head -n $((START_LINE-1)) "$CONFIG_FILE" > "$TEMP_CONFIG"
+    else
+        # 如果删除的是第一个规则，创建空文件
+        > "$TEMP_CONFIG"
+    fi
+    
+    # 写入删除行之后的内容
+    TOTAL_LINES=$(wc -l < "$CONFIG_FILE")
+    if [ "$END_LINE" -lt "$TOTAL_LINES" ]; then
+        tail -n $((TOTAL_LINES-END_LINE)) "$CONFIG_FILE" >> "$TEMP_CONFIG"
+    fi
+    
+    # 备份原配置
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+    
+    # 使用新配置替换旧配置
+    mv "$TEMP_CONFIG" "$CONFIG_FILE"
+    
+    echo -e "${GREEN}已删除规则序号 $RULE_NUM${NC}"
+    
+    # 清理临时文件
+    rm -f "$TEMP_RULES"
+    
+    # 重启服务
+    if systemctl is-active --quiet realm; then
+        echo "重启realm服务..."
+        systemctl restart realm
+        echo -e "${GREEN}服务已重启${NC}"
+    else
+        echo "realm服务未运行，正在启动..."
+        systemctl start realm
+        echo -e "${GREEN}服务已启动${NC}"
+    fi
+}
+
 # 编辑配置文件
 edit_config() {
     check_root
@@ -1189,6 +1623,7 @@ show_help() {
     echo "  -r, --restart    重启Realm服务"
     echo "  -l, --list       列出当前转发规则"
     echo "  -a, --add        添加新的转发规则"
+    echo "  -d, --delete     删除转发规则"
     echo "  -e, --edit       编辑配置文件"
     echo "  -u, --uninstall  卸载Realm"
     echo ""
@@ -1202,13 +1637,14 @@ main_menu() {
     echo "1. 安装或更新 Realm"
     echo "2. 显示当前转发规则"
     echo "3. 添加新的转发规则"
-    echo "4. 编辑配置文件"
-    echo "5. 重启 Realm 服务"
-    echo "6. 查看 Realm 状态"
-    echo "7. 卸载 Realm"
-    echo "8. 退出"
+    echo "4. 删除转发规则"
+    echo "5. 编辑配置文件"
+    echo "6. 重启 Realm 服务"
+    echo "7. 查看 Realm 状态"
+    echo "8. 卸载 Realm"
+    echo "9. 退出"
     echo -e "${BLUE}===========================${NC}"
-    read -p "请选择操作 [1-8]: " choice
+    read -p "请选择操作 [1-9]: " choice
     
     case $choice in
         1)
@@ -1226,12 +1662,19 @@ main_menu() {
             ;;
         4)
             if check_installation; then
-                edit_config
+                delete_forwarding
             else
                 echo -e "${YELLOW}Realm 尚未安装，请先选择选项 1 进行安装${NC}"
             fi
             ;;
         5)
+            if check_installation; then
+                edit_config
+            else
+                echo -e "${YELLOW}Realm 尚未安装，请先选择选项 1 进行安装${NC}"
+            fi
+            ;;
+        6)
             check_root
             if systemctl list-unit-files | grep -q realm.service; then
                 echo "重启 Realm 服务..."
@@ -1241,14 +1684,14 @@ main_menu() {
                 echo -e "${YELLOW}Realm 服务未安装${NC}"
             fi
             ;;
-        6)
+        7)
             if systemctl list-unit-files | grep -q realm.service; then
                 systemctl status realm
             else
                 echo -e "${YELLOW}Realm 服务未安装${NC}"
             fi
             ;;
-        7)
+        8)
             if check_installation; then
                 read -p "确定要卸载 Realm 吗? (y/n): " confirm
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -1260,7 +1703,7 @@ main_menu() {
                 echo -e "${YELLOW}Realm 尚未安装${NC}"
             fi
             ;;
-        8)
+        9)
             echo "退出脚本"
             exit 0
             ;;
@@ -1310,6 +1753,14 @@ parse_args() {
         -a|--add)
             if check_installation; then
                 add_new_forwarding
+            else
+                echo -e "${YELLOW}Realm 尚未安装，请先安装${NC}"
+            fi
+            exit 0
+            ;;
+        -d|--delete)
+            if check_installation; then
+                delete_forwarding
             else
                 echo -e "${YELLOW}Realm 尚未安装，请先安装${NC}"
             fi
