@@ -10,7 +10,7 @@
 # 一键安装
 
 ```
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/crazy0x70/scripts/main/realm/realm-install.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/crazy0x70/scripts/refs/heads/main/realm-x/realm-install.sh)"
 ```
 
 # 使用方法
