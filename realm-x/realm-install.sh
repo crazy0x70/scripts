@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# 设置变量
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/usr/local/etc/realm"
 SERVICE_FILE="/etc/systemd/system/realm.service"
@@ -8,14 +7,12 @@ CONFIG_FILE="$CONFIG_DIR/realm.toml"
 SCRIPT_NAME="realm-x"
 SCRIPT_PATH="$INSTALL_DIR/$SCRIPT_NAME"
 
-# 设置颜色
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 RED='\033[0;31m'
 BLUE='\033[0;34m'
-NC='\033[0m' # 恢复默认颜色
+NC='\033[0m'
 
-# 判断是否有root权限
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
         echo -e "${RED}请以root权限运行此脚本${NC}"
@@ -24,32 +21,264 @@ check_root() {
     fi
 }
 
-# 检查realm是否已安装
-check_installation() {
-    if [ -f "$INSTALL_DIR/realm" ] && [ -f "$CONFIG_FILE" ]; then
-        return 0 # 已安装
+check_kernel_version() {
+    KERNEL_VERSION=$(uname -r | cut -d. -f1,2)
+    MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
+    MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
+    
+    if [ "$MAJOR" -gt 5 ] || ([ "$MAJOR" -eq 5 ] && [ "$MINOR" -gt 6 ]); then
+        return 0
     else
-        return 1 # 未安装
+        return 1
     fi
 }
 
-# 添加新的转发规则
+check_mptcp_enabled() {
+    if [ -f "/proc/sys/net/mptcp/enabled" ]; then
+        MPTCP_STATUS=$(cat /proc/sys/net/mptcp/enabled)
+        if [ "$MPTCP_STATUS" = "1" ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+enable_mptcp() {
+    echo "启用MPTCP功能..."
+    
+    local config_success=false
+    
+    if [ -w "/etc/sysctl.conf" ] || touch /etc/sysctl.conf 2>/dev/null; then
+        if ! grep -q "net.mptcp.enabled" /etc/sysctl.conf 2>/dev/null; then
+            echo "net.mptcp.enabled=1" >> /etc/sysctl.conf && config_success=true
+            echo -e "${GREEN}已在/etc/sysctl.conf中添加MPTCP配置${NC}"
+        else
+            sed -i 's/^net.mptcp.enabled=.*/net.mptcp.enabled=1/' /etc/sysctl.conf && config_success=true
+            echo -e "${GREEN}已更新/etc/sysctl.conf中的MPTCP配置${NC}"
+        fi
+    fi
+
+    if [ "$config_success" = false ] && [ -d "/etc/sysctl.d" ]; then
+        echo "net.mptcp.enabled=1" > /etc/sysctl.d/99-mptcp.conf 2>/dev/null && {
+            config_success=true
+            echo -e "${GREEN}已在/etc/sysctl.d/99-mptcp.conf中添加MPTCP配置${NC}"
+        }
+    fi
+    
+    if [ "$config_success" = false ]; then
+        echo -e "${RED}警告：无法写入MPTCP配置文件，配置可能在重启后失效${NC}"
+    fi
+    
+    sysctl -p > /dev/null 2>&1 || sysctl --system > /dev/null 2>&1 || {
+        echo -e "${YELLOW}sysctl命令执行失败，尝试直接设置${NC}"
+        echo 1 > /proc/sys/net/mptcp/enabled 2>/dev/null || true
+    }
+    
+    if check_mptcp_enabled; then
+        if [ "$config_success" = true ]; then
+            echo -e "${GREEN}MPTCP功能已成功启用并已永久保存${NC}"
+        else
+            echo -e "${YELLOW}MPTCP功能已启用但可能在重启后失效${NC}"
+        fi
+        return 0
+    else
+        echo -e "${RED}MPTCP功能启用失败，请检查系统支持${NC}"
+        return 1
+    fi
+}
+
+version_compare() {
+    local version1="$1"
+    local version2="$2"
+    
+    version1=${version1#v}
+    version2=${version2#v}
+    
+    local higher_version=$(printf '%s\n%s\n' "$version1" "$version2" | sort -V | tail -n1)
+    
+    if [ "$version1" = "$higher_version" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+check_and_configure_mptcp() {
+    local version="$1"
+    
+    if version_compare "$version" "2.8.0"; then
+        echo -e "${BLUE}检测到Realm版本 $version 支持MPTCP功能${NC}"
+        
+        if check_kernel_version; then
+            KERNEL_VERSION=$(uname -r)
+            echo -e "${GREEN}内核版本 $KERNEL_VERSION 支持MPTCP${NC}"
+            
+            if ! check_mptcp_enabled; then
+                echo -e "${YELLOW}MPTCP功能未启用，正在配置...${NC}"
+                enable_mptcp
+            else
+                echo -e "${GREEN}MPTCP功能已启用${NC}"
+            fi
+            
+            return 0
+        else
+            KERNEL_VERSION=$(uname -r)
+            echo -e "${YELLOW}当前内核版本 $KERNEL_VERSION 不支持MPTCP（需要>5.6）${NC}"
+            return 1
+        fi
+    else
+        return 1
+    fi
+}
+
+create_config_with_mptcp() {
+    local supports_mptcp="$1"
+    
+    if [ "$supports_mptcp" = "true" ]; then
+        cat > "$CONFIG_FILE" << EOF
+[network]
+no_tcp = false
+use_udp = true
+send_mptcp = false
+accept_mptcp = false
+
+EOF
+    else
+        cat > "$CONFIG_FILE" << EOF
+[network]
+no_tcp = false
+use_udp = true
+
+EOF
+    fi
+}
+
+update_config_with_mptcp() {
+    if [ -f "$CONFIG_FILE" ]; then
+        if ! grep -q "send_mptcp\|accept_mptcp" "$CONFIG_FILE"; then
+            sed -i '/^\[network\]/,/^$/s/use_udp = true/use_udp = true\nsend_mptcp = false\naccept_mptcp = false/' "$CONFIG_FILE"
+            echo -e "${GREEN}已在现有配置文件中添加MPTCP支持${NC}"
+        fi
+    fi
+}
+
+manage_mptcp() {
+    check_root
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${YELLOW}配置文件不存在: $CONFIG_FILE${NC}"
+        return
+    fi
+    
+    if ! grep -q "send_mptcp\|accept_mptcp" "$CONFIG_FILE"; then
+        echo -e "${YELLOW}当前配置文件不支持MPTCP功能${NC}"
+        return
+    fi
+    
+    echo -e "${BLUE}当前MPTCP配置状态:${NC}"
+    echo "------------------------------------"
+    
+    SEND_MPTCP=$(grep "send_mptcp" "$CONFIG_FILE" | grep -o "true\|false")
+    ACCEPT_MPTCP=$(grep "accept_mptcp" "$CONFIG_FILE" | grep -o "true\|false")
+    
+    echo "send_mptcp: $SEND_MPTCP"
+    echo "accept_mptcp: $ACCEPT_MPTCP"
+    
+    if check_mptcp_enabled; then
+        echo -e "系统MPTCP状态: ${GREEN}已启用${NC}"
+    else
+        echo -e "系统MPTCP状态: ${RED}未启用${NC}"
+    fi
+    
+    echo "------------------------------------"
+    
+    echo "MPTCP管理选项:"
+    echo "1. 启用MPTCP (send_mptcp=true, accept_mptcp=true)"
+    echo "2. 禁用MPTCP (send_mptcp=false, accept_mptcp=false)"
+    echo "3. 仅启用发送 (send_mptcp=true, accept_mptcp=false)"
+    echo "4. 仅启用接收 (send_mptcp=false, accept_mptcp=true)"
+    echo "5. 返回主菜单"
+    
+    read -p "请选择 [1-5]: " mptcp_choice
+    
+    case $mptcp_choice in
+        1)
+            sed -i 's/send_mptcp = false/send_mptcp = true/' "$CONFIG_FILE"
+            sed -i 's/accept_mptcp = false/accept_mptcp = true/' "$CONFIG_FILE"
+            echo -e "${GREEN}已启用MPTCP功能${NC}"
+            ;;
+        2)
+            sed -i 's/send_mptcp = true/send_mptcp = false/' "$CONFIG_FILE"
+            sed -i 's/accept_mptcp = true/accept_mptcp = false/' "$CONFIG_FILE"
+            echo -e "${YELLOW}已禁用MPTCP功能${NC}"
+            ;;
+        3)
+            sed -i 's/send_mptcp = false/send_mptcp = true/' "$CONFIG_FILE"
+            sed -i 's/accept_mptcp = true/accept_mptcp = false/' "$CONFIG_FILE"
+            echo -e "${GREEN}已启用MPTCP发送功能${NC}"
+            ;;
+        4)
+            sed -i 's/send_mptcp = true/send_mptcp = false/' "$CONFIG_FILE"
+            sed -i 's/accept_mptcp = false/accept_mptcp = true/' "$CONFIG_FILE"
+            echo -e "${GREEN}已启用MPTCP接收功能${NC}"
+            ;;
+        5)
+            return
+            ;;
+        *)
+            echo -e "${RED}无效的选择${NC}"
+            return
+            ;;
+    esac
+    
+    read -p "是否重启realm服务以应用更改? (y/n): " restart_service
+    if [[ "$restart_service" =~ ^[Yy]$ ]]; then
+        if systemctl is-active --quiet realm; then
+            systemctl restart realm
+            echo -e "${GREEN}服务已重启${NC}"
+        else
+            systemctl start realm
+            echo -e "${GREEN}服务已启动${NC}"
+        fi
+    fi
+}
+
+check_installation() {
+    if [ -f "$INSTALL_DIR/realm" ] && [ -f "$CONFIG_FILE" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 add_new_forwarding() {
     check_root
-    # 获取用户输入的端口和目标
     read -p "请输入本地监听端口: " LOCAL_PORT
     read -p "请输入远程目标地址(IP或域名): " REMOTE_TARGET
     read -p "请输入远程目标端口: " REMOTE_PORT
+    
+    MPTCP_SUPPORTED=false
+    if grep -q "send_mptcp\|accept_mptcp" "$CONFIG_FILE" 2>/dev/null; then
+        MPTCP_SUPPORTED=true
+    fi
 
-    # 处理IPv6地址
+    ENABLE_MPTCP=false
+    if [ "$MPTCP_SUPPORTED" = "true" ]; then
+        read -p "是否启用MPTCP支持? (y/n): " USE_MPTCP
+        if [[ "$USE_MPTCP" =~ ^[Yy]$ ]]; then
+            ENABLE_MPTCP=true
+            sed -i 's/send_mptcp = false/send_mptcp = true/' "$CONFIG_FILE"
+            sed -i 's/accept_mptcp = false/accept_mptcp = true/' "$CONFIG_FILE"
+            echo -e "${GREEN}已启用全局MPTCP支持${NC}"
+        fi
+    fi
+
     if [[ "$REMOTE_TARGET" =~ : ]]; then
-        # 检查是否已经有方括号
         if [[ ! "$REMOTE_TARGET" =~ ^\[.*\]$ ]]; then
             REMOTE_TARGET="[$REMOTE_TARGET]"
         fi
     fi
 
-    # 询问是否配置加密隧道
     read -p "是否配置加密隧道? (y/n): " USE_ENCRYPTION
     ENCRYPTION_CONFIG=""
     
@@ -101,7 +330,6 @@ add_new_forwarding() {
         esac
     fi
 
-    # 添加新的endpoint配置
     if [ -n "$ENCRYPTION_CONFIG" ]; then
         echo -e "\n[[endpoints]]\nlisten = \"0.0.0.0:${LOCAL_PORT}\"\nremote = \"${REMOTE_TARGET}:${REMOTE_PORT}\"\nremote_transport = \"${ENCRYPTION_CONFIG}\"" >> "$CONFIG_FILE"
         echo -e "${GREEN}已添加新的加密转发规则: 0.0.0.0:${LOCAL_PORT} -> ${REMOTE_TARGET}:${REMOTE_PORT} (加密类型: ${ENCRYPTION_CONFIG})${NC}"
@@ -109,8 +337,11 @@ add_new_forwarding() {
         echo -e "\n[[endpoints]]\nlisten = \"0.0.0.0:${LOCAL_PORT}\"\nremote = \"${REMOTE_TARGET}:${REMOTE_PORT}\"" >> "$CONFIG_FILE"
         echo -e "${GREEN}已添加新的转发规则: 0.0.0.0:${LOCAL_PORT} -> ${REMOTE_TARGET}:${REMOTE_PORT}${NC}"
     fi
-    
-    # 重启服务
+
+    if [ "$ENABLE_MPTCP" = "true" ]; then
+        echo -e "${GREEN}转发规则已启用MPTCP支持${NC}"
+    fi
+
     if systemctl is-active --quiet realm; then
         echo "重启realm服务..."
         systemctl restart realm
@@ -122,7 +353,6 @@ add_new_forwarding() {
     fi
 }
 
-# 删除转发规则
 delete_forwarding() {
     check_root
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -130,11 +360,9 @@ delete_forwarding() {
         return
     fi
     
-    # 显示当前规则
     echo -e "${BLUE}当前转发规则:${NC}"
     echo "------------------------------------"
     
-    # 简化规则解析并显示
     RULES=$(awk '
     BEGIN { count = 0; endpoint_start = 0; }
     /\[\[endpoints\]\]/ { 
@@ -161,17 +389,15 @@ delete_forwarding() {
         } else {
           print i " : " listen[i] " -> " remote[i];
         }
-        print endpoints[i];  # 打印行号信息用于后续处理
+        print endpoints[i];
       }
     }' "$CONFIG_FILE")
     
-    # 检查是否有规则
     if [ -z "$RULES" ]; then
         echo "没有找到转发规则"
         return
     fi
     
-    # 解析规则和行号信息
     RULE_COUNT=$(echo "$RULES" | awk 'NR % 2 == 1 {count++} END {print count}')
     
     if [ "$RULE_COUNT" -eq 0 ]; then
@@ -179,63 +405,48 @@ delete_forwarding() {
         return
     fi
     
-    # 将规则和行号信息分开
     DISPLAY_RULES=$(echo "$RULES" | awk 'NR % 2 == 1 {print}')
     RULE_LINES=$(echo "$RULES" | awk 'NR % 2 == 0 {print}')
     
-    # 显示规则供用户选择
     echo "$DISPLAY_RULES"
     echo "------------------------------------"
     
-    # 用户选择
     read -p "请输入要删除的规则序号 [0-$((RULE_COUNT-1))]: " RULE_NUM
     
-    # 验证输入
     if ! [[ "$RULE_NUM" =~ ^[0-9]+$ ]] || [ "$RULE_NUM" -ge "$RULE_COUNT" ]; then
         echo -e "${RED}无效的规则序号${NC}"
         return
     fi
     
-    # 获取所选规则的行号
     LINE_NUM=$(echo "$RULE_LINES" | sed -n "$((RULE_NUM+1))p")
     
-    # 找到规则的开始和结束位置
     START_LINE=$LINE_NUM
     
-    # 找到下一个规则的开始行或文件结束
     if [ "$RULE_NUM" -lt "$((RULE_COUNT-1))" ]; then
         NEXT_LINE=$(echo "$RULE_LINES" | sed -n "$((RULE_NUM+2))p")
         END_LINE=$((NEXT_LINE-1))
     else
-        # 如果是最后一条规则，则到文件末尾
         END_LINE=$(wc -l < "$CONFIG_FILE")
     fi
     
-    # 创建新的配置文件，排除要删除的规则
     TEMP_CONFIG=$(mktemp)
     
-    # 写入删除行之前的内容
     if [ "$START_LINE" -gt 1 ]; then
         head -n $((START_LINE-1)) "$CONFIG_FILE" > "$TEMP_CONFIG"
     else
-        # 如果删除的是第一个规则，创建空文件
         > "$TEMP_CONFIG"
     fi
     
-    # 写入删除行之后的内容
     if [ "$END_LINE" -lt "$(wc -l < "$CONFIG_FILE")" ]; then
         tail -n $(($(wc -l < "$CONFIG_FILE") - END_LINE)) "$CONFIG_FILE" >> "$TEMP_CONFIG"
     fi
     
-    # 备份原配置
     cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
     
-    # 使用新配置替换旧配置
     mv "$TEMP_CONFIG" "$CONFIG_FILE"
     
     echo -e "${GREEN}已删除规则序号 $RULE_NUM${NC}"
     
-    # 重启服务
     if systemctl is-active --quiet realm; then
         echo "重启realm服务..."
         systemctl restart realm
@@ -247,12 +458,10 @@ delete_forwarding() {
     fi
 }
 
-# 卸载realm
 uninstall_realm() {
     check_root
     echo -e "${YELLOW}正在卸载Realm...${NC}"
     
-    # 停止并禁用服务
     if systemctl is-active --quiet realm; then
         echo "停止realm服务..."
         systemctl stop realm
@@ -263,20 +472,17 @@ uninstall_realm() {
         systemctl disable realm
     fi
     
-    # 删除服务文件
     if [ -f "$SERVICE_FILE" ]; then
         echo "删除服务文件..."
         rm -f "$SERVICE_FILE"
         systemctl daemon-reload
     fi
     
-    # 删除二进制文件
     if [ -f "$INSTALL_DIR/realm" ]; then
         echo "删除二进制文件..."
         rm -f "$INSTALL_DIR/realm"
     fi
     
-    # 询问是否删除配置文件
     read -p "是否删除配置文件? (y/n): " REMOVE_CONFIG
     if [[ "$REMOVE_CONFIG" =~ ^[Yy]$ ]]; then
         echo "删除配置目录..."
@@ -285,18 +491,12 @@ uninstall_realm() {
         echo "保留配置文件，位置: $CONFIG_DIR"
     fi
     
-    # 删除realm-x脚本
     echo "删除realm-x命令..."
     
-    # 创建临时脚本用于删除自己
     TEMP_SCRIPT=$(mktemp)
     cat > "$TEMP_SCRIPT" << 'EOF'
-#!/bin/bash
-# 等待原脚本退出
 sleep 1
-# 删除realm-x脚本
 rm -f "/usr/local/bin/realm-x"
-# 删除自己
 rm -f "$0"
 EOF
     
@@ -305,20 +505,16 @@ EOF
     echo -e "${GREEN}Realm 已成功卸载${NC}"
     echo "realm-x命令将在退出后删除"
     
-    # 在后台执行临时脚本
     nohup "$TEMP_SCRIPT" > /dev/null 2>&1 &
     
     exit 0
 }
 
-# 执行完整安装
 perform_installation() {
     check_root
-    # 创建临时目录
     TMP_DIR=$(mktemp -d)
     cd "$TMP_DIR" || exit 1
 
-    # 获取最新版本
     echo "获取最新版本..."
     LATEST_VERSION=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest | grep "tag_name" | cut -d '"' -f 4)
 
@@ -328,9 +524,13 @@ perform_installation() {
     fi
 
     echo -e "${GREEN}最新版本: $LATEST_VERSION${NC}"
-    DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}"
+    
+    MPTCP_SUPPORTED=false
+    if check_and_configure_mptcp "$LATEST_VERSION"; then
+        MPTCP_SUPPORTED=true
+    fi
 
-    # 获取系统架构
+    DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}"
     get_arch() {
         ARCH=$(uname -m)
         OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -396,7 +596,6 @@ perform_installation() {
         esac
     }
 
-    # 获取当前架构
     CURRENT_ARCH=$(get_arch)
 
     if [ "$CURRENT_ARCH" = "unsupported" ]; then
@@ -426,7 +625,6 @@ perform_installation() {
     echo "下载完成，开始解压"
     tar -xzf "$FILENAME"
 
-    # 判断安装路径是否存在
     if [ -d "$INSTALL_DIR" ] && [ -w "$INSTALL_DIR" ]; then
         echo "将realm二进制文件安装到 $INSTALL_DIR"
         cp realm "$INSTALL_DIR/"
@@ -442,40 +640,31 @@ perform_installation() {
         CONFIG_FILE="$CONFIG_DIR/realm.toml"
     fi
 
-    # 检查配置文件是否已存在
     if [ ! -f "$CONFIG_FILE" ]; then
-        # 如果不存在配置文件，创建一个基本的配置
         echo "配置文件不存在，将创建基本配置..."
         
-        # 创建配置目录
         if [ -d "$CONFIG_DIR" ] || mkdir -p "$CONFIG_DIR"; then
             echo "创建配置文件 $CONFIG_FILE"
-            cat > "$CONFIG_FILE" << EOF
-[network]
-no_tcp = false
-use_udp = true
-
-# 请使用 'realm-x -a' 添加转发规则
-EOF
+            create_config_with_mptcp "$MPTCP_SUPPORTED"
         else
             echo -e "${YELLOW}无法创建配置目录 $CONFIG_DIR${NC}"
             CONFIG_DIR="$PWD"
             CONFIG_FILE="$CONFIG_DIR/realm.toml"
-            cat > "$CONFIG_FILE" << EOF
-[network]
-no_tcp = false
-use_udp = true
-
-# 请使用 'realm-x -a' 添加转发规则
-EOF
+            create_config_with_mptcp "$MPTCP_SUPPORTED"
         fi
         
         echo -e "${YELLOW}请在安装完成后使用 'realm-x -a' 命令添加转发规则${NC}"
     else
         echo "检测到已存在配置文件，保留现有配置"
+        if [ "$MPTCP_SUPPORTED" = "true" ]; then
+            update_config_with_mptcp
+        fi
     fi
 
-    # 创建systemd服务文件
+    if [ "$MPTCP_SUPPORTED" = "true" ]; then
+        echo -e "${GREEN}此版本支持MPTCP功能，您可以使用 'realm-x --mptcp' 管理MPTCP设置${NC}"
+    fi
+
     if [ -d "/etc/systemd/system" ] && [ -w "/etc/systemd/system" ]; then
         echo "创建systemd服务文件 $SERVICE_FILE"
         cat > "$SERVICE_FILE" << EOF
@@ -483,7 +672,7 @@ EOF
 Description=realm
 After=network-online.target
 Wants=network-online.target systemd-networkd-wait-online.service
- 
+
 [Service]
 Type=simple
 User=root
@@ -491,7 +680,7 @@ Restart=always
 RestartSec=5s
 DynamicUser=true
 ExecStart=$REALM_PATH -c $CONFIG_FILE
- 
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -511,7 +700,7 @@ EOF
 Description=realm
 After=network-online.target
 Wants=network-online.target systemd-networkd-wait-online.service
- 
+
 [Service]
 Type=simple
 User=root
@@ -519,17 +708,15 @@ Restart=always
 RestartSec=5s
 DynamicUser=true
 ExecStart=$REALM_PATH -c $CONFIG_FILE
- 
+
 [Install]
 WantedBy=multi-user.target
 EOF
         echo "服务文件已保存到 $SERVICE_FILE"
     fi
 
-    # 在系统中安装realm-x命令
     install_command
 
-    # 清理
     echo "清理临时文件"
     rm -f "$FILENAME"
     cd - > /dev/null
@@ -541,16 +728,12 @@ EOF
     echo -e "${GREEN}您现在可以使用 'realm-x -a' 命令添加转发规则${NC}"
 }
 
-# 安装realm-x命令
 install_command() {
     check_root
     echo "安装realm-x命令..."
     
-    # 获取脚本内容并直接写入目标文件
     cat > "$SCRIPT_PATH" << 'REALMX_SCRIPT'
 #!/bin/bash
-
-# 设置变量
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/usr/local/etc/realm"
 SERVICE_FILE="/etc/systemd/system/realm.service"
@@ -558,14 +741,12 @@ CONFIG_FILE="$CONFIG_DIR/realm.toml"
 SCRIPT_NAME="realm-x"
 SCRIPT_PATH="$INSTALL_DIR/$SCRIPT_NAME"
 
-# 设置颜色
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 RED='\033[0;31m'
 BLUE='\033[0;34m'
-NC='\033[0m' # 恢复默认颜色
+NC='\033[0m'
 
-# 判断是否有root权限
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
         echo -e "${RED}请以root权限运行此脚本${NC}"
@@ -574,32 +755,269 @@ check_root() {
     fi
 }
 
-# 检查realm是否已安装
 check_installation() {
     if [ -f "$INSTALL_DIR/realm" ] && [ -f "$CONFIG_FILE" ]; then
-        return 0 # 已安装
+        return 0
     else
-        return 1 # 未安装
+        return 1
     fi
 }
 
-# 添加新的转发规则
+check_kernel_version() {
+    KERNEL_VERSION=$(uname -r | cut -d. -f1,2)
+    MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
+    MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
+    
+    if [ "$MAJOR" -gt 5 ] || ([ "$MAJOR" -eq 5 ] && [ "$MINOR" -gt 6 ]); then
+        return 0
+    else
+        return 1
+    fi
+}
+
+check_mptcp_enabled() {
+    if [ -f "/proc/sys/net/mptcp/enabled" ]; then
+        MPTCP_STATUS=$(cat /proc/sys/net/mptcp/enabled)
+        if [ "$MPTCP_STATUS" = "1" ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+enable_mptcp() {
+    echo "启用MPTCP功能..."
+    
+    # 尝试多种方式确保配置持久化
+    local config_success=false
+    
+    # 方法1: 使用/etc/sysctl.conf
+    if [ -w "/etc/sysctl.conf" ] || touch /etc/sysctl.conf 2>/dev/null; then
+        if ! grep -q "net.mptcp.enabled" /etc/sysctl.conf 2>/dev/null; then
+            echo "net.mptcp.enabled=1" >> /etc/sysctl.conf && config_success=true
+            echo -e "${GREEN}已在/etc/sysctl.conf中添加MPTCP配置${NC}"
+        else
+            sed -i 's/^net.mptcp.enabled=.*/net.mptcp.enabled=1/' /etc/sysctl.conf && config_success=true
+            echo -e "${GREEN}已更新/etc/sysctl.conf中的MPTCP配置${NC}"
+        fi
+    fi
+    
+    # 方法2: 如果方法1失败，尝试使用/etc/sysctl.d/
+    if [ "$config_success" = false ] && [ -d "/etc/sysctl.d" ]; then
+        echo "net.mptcp.enabled=1" > /etc/sysctl.d/99-mptcp.conf 2>/dev/null && {
+            config_success=true
+            echo -e "${GREEN}已在/etc/sysctl.d/99-mptcp.conf中添加MPTCP配置${NC}"
+        }
+    fi
+    
+    if [ "$config_success" = false ]; then
+        echo -e "${RED}警告：无法写入MPTCP配置文件，配置可能在重启后失效${NC}"
+    fi
+    
+    # 立即应用配置
+    sysctl -p > /dev/null 2>&1 || sysctl --system > /dev/null 2>&1 || {
+        echo -e "${YELLOW}sysctl命令执行失败，尝试直接设置${NC}"
+        echo 1 > /proc/sys/net/mptcp/enabled 2>/dev/null || true
+    }
+    
+    # 验证配置是否生效
+    if check_mptcp_enabled; then
+        if [ "$config_success" = true ]; then
+            echo -e "${GREEN}MPTCP功能已成功启用并已永久保存${NC}"
+        else
+            echo -e "${YELLOW}MPTCP功能已启用但可能在重启后失效${NC}"
+        fi
+        return 0
+    else
+        echo -e "${RED}MPTCP功能启用失败，请检查系统支持${NC}"
+        return 1
+    fi
+}
+
+version_compare() {
+    local version1="$1"
+    local version2="$2"
+    
+    version1=${version1#v}
+    version2=${version2#v}
+    
+    local higher_version=$(printf '%s\n%s\n' "$version1" "$version2" | sort -V | tail -n1)
+    
+    if [ "$version1" = "$higher_version" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+check_and_configure_mptcp() {
+    local version="$1"
+    
+    if version_compare "$version" "2.8.0"; then
+        echo -e "${BLUE}检测到Realm版本 $version 支持MPTCP功能${NC}"
+        
+        if check_kernel_version; then
+            KERNEL_VERSION=$(uname -r)
+            echo -e "${GREEN}内核版本 $KERNEL_VERSION 支持MPTCP${NC}"
+            
+            if ! check_mptcp_enabled; then
+                echo -e "${YELLOW}MPTCP功能未启用，正在配置...${NC}"
+                enable_mptcp
+            else
+                echo -e "${GREEN}MPTCP功能已启用${NC}"
+            fi
+            
+            return 0
+        else
+            KERNEL_VERSION=$(uname -r)
+            echo -e "${YELLOW}当前内核版本 $KERNEL_VERSION 不支持MPTCP（需要>5.6）${NC}"
+            return 1
+        fi
+    else
+        return 1
+    fi
+}
+
+create_config_with_mptcp() {
+    local supports_mptcp="$1"
+    
+    if [ "$supports_mptcp" = "true" ]; then
+        cat > "$CONFIG_FILE" << EOF
+[network]
+no_tcp = false
+use_udp = true
+send_mptcp = false
+accept_mptcp = false
+
+EOF
+    else
+        cat > "$CONFIG_FILE" << EOF
+[network]
+no_tcp = false
+use_udp = true
+
+EOF
+    fi
+}
+
+update_config_with_mptcp() {
+    if [ -f "$CONFIG_FILE" ]; then
+        if ! grep -q "send_mptcp\|accept_mptcp" "$CONFIG_FILE"; then
+            sed -i '/^\[network\]/,/^$/s/use_udp = true/use_udp = true\nsend_mptcp = false\naccept_mptcp = false/' "$CONFIG_FILE"
+            echo -e "${GREEN}已在现有配置文件中添加MPTCP支持${NC}"
+        fi
+    fi
+}
+
+manage_mptcp() {
+    check_root
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${YELLOW}配置文件不存在: $CONFIG_FILE${NC}"
+        return
+    fi
+    
+    if ! grep -q "send_mptcp\|accept_mptcp" "$CONFIG_FILE"; then
+        echo -e "${YELLOW}当前配置文件不支持MPTCP功能${NC}"
+        return
+    fi
+    
+    echo -e "${BLUE}当前MPTCP配置状态:${NC}"
+    echo "------------------------------------"
+    
+    SEND_MPTCP=$(grep "send_mptcp" "$CONFIG_FILE" | grep -o "true\|false")
+    ACCEPT_MPTCP=$(grep "accept_mptcp" "$CONFIG_FILE" | grep -o "true\|false")
+    
+    echo "send_mptcp: $SEND_MPTCP"
+    echo "accept_mptcp: $ACCEPT_MPTCP"
+    
+    if check_mptcp_enabled; then
+        echo -e "系统MPTCP状态: ${GREEN}已启用${NC}"
+    else
+        echo -e "系统MPTCP状态: ${RED}未启用${NC}"
+    fi
+    
+    echo "------------------------------------"
+    
+    echo "MPTCP管理选项:"
+    echo "1. 启用MPTCP (send_mptcp=true, accept_mptcp=true)"
+    echo "2. 禁用MPTCP (send_mptcp=false, accept_mptcp=false)"
+    echo "3. 仅启用发送 (send_mptcp=true, accept_mptcp=false)"
+    echo "4. 仅启用接收 (send_mptcp=false, accept_mptcp=true)"
+    echo "5. 返回主菜单"
+    
+    read -p "请选择 [1-5]: " mptcp_choice
+    
+    case $mptcp_choice in
+        1)
+            sed -i 's/send_mptcp = false/send_mptcp = true/' "$CONFIG_FILE"
+            sed -i 's/accept_mptcp = false/accept_mptcp = true/' "$CONFIG_FILE"
+            echo -e "${GREEN}已启用MPTCP功能${NC}"
+            ;;
+        2)
+            sed -i 's/send_mptcp = true/send_mptcp = false/' "$CONFIG_FILE"
+            sed -i 's/accept_mptcp = true/accept_mptcp = false/' "$CONFIG_FILE"
+            echo -e "${YELLOW}已禁用MPTCP功能${NC}"
+            ;;
+        3)
+            sed -i 's/send_mptcp = false/send_mptcp = true/' "$CONFIG_FILE"
+            sed -i 's/accept_mptcp = true/accept_mptcp = false/' "$CONFIG_FILE"
+            echo -e "${GREEN}已启用MPTCP发送功能${NC}"
+            ;;
+        4)
+            sed -i 's/send_mptcp = true/send_mptcp = false/' "$CONFIG_FILE"
+            sed -i 's/accept_mptcp = false/accept_mptcp = true/' "$CONFIG_FILE"
+            echo -e "${GREEN}已启用MPTCP接收功能${NC}"
+            ;;
+        5)
+            return
+            ;;
+        *)
+            echo -e "${RED}无效的选择${NC}"
+            return
+            ;;
+    esac
+    
+    read -p "是否重启realm服务以应用更改? (y/n): " restart_service
+    if [[ "$restart_service" =~ ^[Yy]$ ]]; then
+        if systemctl is-active --quiet realm; then
+            systemctl restart realm
+            echo -e "${GREEN}服务已重启${NC}"
+        else
+            systemctl start realm
+            echo -e "${GREEN}服务已启动${NC}"
+        fi
+    fi
+}
+
 add_new_forwarding() {
     check_root
-    # 获取用户输入的端口和目标
     read -p "请输入本地监听端口: " LOCAL_PORT
     read -p "请输入远程目标地址(IP或域名): " REMOTE_TARGET
     read -p "请输入远程目标端口: " REMOTE_PORT
 
-    # 处理IPv6地址
     if [[ "$REMOTE_TARGET" =~ : ]]; then
-        # 检查是否已经有方括号
         if [[ ! "$REMOTE_TARGET" =~ ^\[.*\]$ ]]; then
             REMOTE_TARGET="[$REMOTE_TARGET]"
         fi
     fi
 
-    # 询问是否配置加密隧道
+    MPTCP_SUPPORTED=false
+    if grep -q "send_mptcp\|accept_mptcp" "$CONFIG_FILE" 2>/dev/null; then
+        MPTCP_SUPPORTED=true
+    fi
+
+    ENABLE_MPTCP=false
+    if [ "$MPTCP_SUPPORTED" = "true" ]; then
+        read -p "是否启用MPTCP支持? (y/n): " USE_MPTCP
+        if [[ "$USE_MPTCP" =~ ^[Yy]$ ]]; then
+            ENABLE_MPTCP=true
+            sed -i 's/send_mptcp = false/send_mptcp = true/' "$CONFIG_FILE"
+            sed -i 's/accept_mptcp = false/accept_mptcp = true/' "$CONFIG_FILE"
+            echo -e "${GREEN}已启用全局MPTCP支持${NC}"
+        fi
+    fi
+
     read -p "是否配置加密隧道? (y/n): " USE_ENCRYPTION
     ENCRYPTION_CONFIG=""
     
@@ -651,7 +1069,6 @@ add_new_forwarding() {
         esac
     fi
 
-    # 添加新的endpoint配置
     if [ -n "$ENCRYPTION_CONFIG" ]; then
         echo -e "\n[[endpoints]]\nlisten = \"0.0.0.0:${LOCAL_PORT}\"\nremote = \"${REMOTE_TARGET}:${REMOTE_PORT}\"\nremote_transport = \"${ENCRYPTION_CONFIG}\"" >> "$CONFIG_FILE"
         echo -e "${GREEN}已添加新的加密转发规则: 0.0.0.0:${LOCAL_PORT} -> ${REMOTE_TARGET}:${REMOTE_PORT} (加密类型: ${ENCRYPTION_CONFIG})${NC}"
@@ -660,7 +1077,10 @@ add_new_forwarding() {
         echo -e "${GREEN}已添加新的转发规则: 0.0.0.0:${LOCAL_PORT} -> ${REMOTE_TARGET}:${REMOTE_PORT}${NC}"
     fi
     
-    # 重启服务
+    if [ "$ENABLE_MPTCP" = "true" ]; then
+        echo -e "${GREEN}转发规则已启用MPTCP支持${NC}"
+    fi
+    
     if systemctl is-active --quiet realm; then
         echo "重启realm服务..."
         systemctl restart realm
@@ -672,7 +1092,6 @@ add_new_forwarding() {
     fi
 }
 
-# 删除转发规则
 delete_forwarding() {
     check_root
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -680,11 +1099,9 @@ delete_forwarding() {
         return
     fi
     
-    # 显示当前规则
     echo -e "${BLUE}当前转发规则:${NC}"
     echo "------------------------------------"
     
-    # 简化规则解析并显示
     RULES=$(awk '
     BEGIN { count = 0; endpoint_start = 0; }
     /\[\[endpoints\]\]/ { 
@@ -711,17 +1128,15 @@ delete_forwarding() {
         } else {
           print i " : " listen[i] " -> " remote[i];
         }
-        print endpoints[i];  # 打印行号信息用于后续处理
+        print endpoints[i];
       }
     }' "$CONFIG_FILE")
     
-    # 检查是否有规则
     if [ -z "$RULES" ]; then
         echo "没有找到转发规则"
         return
     fi
     
-    # 解析规则和行号信息
     RULE_COUNT=$(echo "$RULES" | awk 'NR % 2 == 1 {count++} END {print count}')
     
     if [ "$RULE_COUNT" -eq 0 ]; then
@@ -729,63 +1144,48 @@ delete_forwarding() {
         return
     fi
     
-    # 将规则和行号信息分开
     DISPLAY_RULES=$(echo "$RULES" | awk 'NR % 2 == 1 {print}')
     RULE_LINES=$(echo "$RULES" | awk 'NR % 2 == 0 {print}')
     
-    # 显示规则供用户选择
     echo "$DISPLAY_RULES"
     echo "------------------------------------"
     
-    # 用户选择
     read -p "请输入要删除的规则序号 [0-$((RULE_COUNT-1))]: " RULE_NUM
     
-    # 验证输入
     if ! [[ "$RULE_NUM" =~ ^[0-9]+$ ]] || [ "$RULE_NUM" -ge "$RULE_COUNT" ]; then
         echo -e "${RED}无效的规则序号${NC}"
         return
     fi
     
-    # 获取所选规则的行号
     LINE_NUM=$(echo "$RULE_LINES" | sed -n "$((RULE_NUM+1))p")
     
-    # 找到规则的开始和结束位置
     START_LINE=$LINE_NUM
     
-    # 找到下一个规则的开始行或文件结束
     if [ "$RULE_NUM" -lt "$((RULE_COUNT-1))" ]; then
         NEXT_LINE=$(echo "$RULE_LINES" | sed -n "$((RULE_NUM+2))p")
         END_LINE=$((NEXT_LINE-1))
     else
-        # 如果是最后一条规则，则到文件末尾
         END_LINE=$(wc -l < "$CONFIG_FILE")
     fi
     
-    # 创建新的配置文件，排除要删除的规则
     TEMP_CONFIG=$(mktemp)
     
-    # 写入删除行之前的内容
     if [ "$START_LINE" -gt 1 ]; then
         head -n $((START_LINE-1)) "$CONFIG_FILE" > "$TEMP_CONFIG"
     else
-        # 如果删除的是第一个规则，创建空文件
         > "$TEMP_CONFIG"
     fi
     
-    # 写入删除行之后的内容
     if [ "$END_LINE" -lt "$(wc -l < "$CONFIG_FILE")" ]; then
         tail -n $(($(wc -l < "$CONFIG_FILE") - END_LINE)) "$CONFIG_FILE" >> "$TEMP_CONFIG"
     fi
     
-    # 备份原配置
     cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
     
-    # 使用新配置替换旧配置
     mv "$TEMP_CONFIG" "$CONFIG_FILE"
     
     echo -e "${GREEN}已删除规则序号 $RULE_NUM${NC}"
     
-    # 重启服务
     if systemctl is-active --quiet realm; then
         echo "重启realm服务..."
         systemctl restart realm
@@ -797,12 +1197,10 @@ delete_forwarding() {
     fi
 }
 
-# 卸载realm
 uninstall_realm() {
     check_root
     echo -e "${YELLOW}正在卸载Realm...${NC}"
     
-    # 停止并禁用服务
     if systemctl is-active --quiet realm; then
         echo "停止realm服务..."
         systemctl stop realm
@@ -813,20 +1211,17 @@ uninstall_realm() {
         systemctl disable realm
     fi
     
-    # 删除服务文件
     if [ -f "$SERVICE_FILE" ]; then
         echo "删除服务文件..."
         rm -f "$SERVICE_FILE"
         systemctl daemon-reload
     fi
     
-    # 删除二进制文件
     if [ -f "$INSTALL_DIR/realm" ]; then
         echo "删除二进制文件..."
         rm -f "$INSTALL_DIR/realm"
     fi
     
-    # 询问是否删除配置文件
     read -p "是否删除配置文件? (y/n): " REMOVE_CONFIG
     if [[ "$REMOVE_CONFIG" =~ ^[Yy]$ ]]; then
         echo "删除配置目录..."
@@ -835,18 +1230,12 @@ uninstall_realm() {
         echo "保留配置文件，位置: $CONFIG_DIR"
     fi
     
-    # 删除realm-x脚本
     echo "删除realm-x命令..."
     
-    # 创建临时脚本用于删除自己
     TEMP_SCRIPT=$(mktemp)
     cat > "$TEMP_SCRIPT" << 'EOF'
-#!/bin/bash
-# 等待原脚本退出
 sleep 1
-# 删除realm-x脚本
 rm -f "/usr/local/bin/realm-x"
-# 删除自己
 rm -f "$0"
 EOF
     
@@ -855,20 +1244,16 @@ EOF
     echo -e "${GREEN}Realm 已成功卸载${NC}"
     echo "realm-x命令将在退出后删除"
     
-    # 在后台执行临时脚本
     nohup "$TEMP_SCRIPT" > /dev/null 2>&1 &
     
     exit 0
 }
 
-# 执行完整安装
 perform_installation() {
     check_root
-    # 创建临时目录
     TMP_DIR=$(mktemp -d)
     cd "$TMP_DIR" || exit 1
 
-    # 获取最新版本
     echo "获取最新版本..."
     LATEST_VERSION=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest | grep "tag_name" | cut -d '"' -f 4)
 
@@ -878,9 +1263,14 @@ perform_installation() {
     fi
 
     echo -e "${GREEN}最新版本: $LATEST_VERSION${NC}"
+    
+    MPTCP_SUPPORTED=false
+    if check_and_configure_mptcp "$LATEST_VERSION"; then
+        MPTCP_SUPPORTED=true
+    fi
+
     DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}"
 
-    # 获取系统架构
     get_arch() {
         ARCH=$(uname -m)
         OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -946,7 +1336,6 @@ perform_installation() {
         esac
     }
 
-    # 获取当前架构
     CURRENT_ARCH=$(get_arch)
 
     if [ "$CURRENT_ARCH" = "unsupported" ]; then
@@ -976,7 +1365,6 @@ perform_installation() {
     echo "下载完成，开始解压"
     tar -xzf "$FILENAME"
 
-    # 判断安装路径是否存在
     if [ -d "$INSTALL_DIR" ] && [ -w "$INSTALL_DIR" ]; then
         echo "将realm二进制文件安装到 $INSTALL_DIR"
         cp realm "$INSTALL_DIR/"
@@ -991,41 +1379,32 @@ perform_installation() {
         SERVICE_FILE="$PWD/realm.service"
         CONFIG_FILE="$CONFIG_DIR/realm.toml"
     fi
-
-    # 检查配置文件是否已存在
+    
     if [ ! -f "$CONFIG_FILE" ]; then
-        # 如果不存在配置文件，创建一个基本的配置
         echo "配置文件不存在，将创建基本配置..."
         
-        # 创建配置目录
         if [ -d "$CONFIG_DIR" ] || mkdir -p "$CONFIG_DIR"; then
             echo "创建配置文件 $CONFIG_FILE"
-            cat > "$CONFIG_FILE" << EOF
-[network]
-no_tcp = false
-use_udp = true
-
-# 请使用 'realm-x -a' 添加转发规则
-EOF
+            create_config_with_mptcp "$MPTCP_SUPPORTED"
         else
             echo -e "${YELLOW}无法创建配置目录 $CONFIG_DIR${NC}"
             CONFIG_DIR="$PWD"
             CONFIG_FILE="$CONFIG_DIR/realm.toml"
-            cat > "$CONFIG_FILE" << EOF
-[network]
-no_tcp = false
-use_udp = true
-
-# 请使用 'realm-x -a' 添加转发规则
-EOF
+            create_config_with_mptcp "$MPTCP_SUPPORTED"
         fi
         
         echo -e "${YELLOW}请在安装完成后使用 'realm-x -a' 命令添加转发规则${NC}"
     else
         echo "检测到已存在配置文件，保留现有配置"
+        if [ "$MPTCP_SUPPORTED" = "true" ]; then
+            update_config_with_mptcp
+        fi
     fi
 
-    # 创建systemd服务文件
+    if [ "$MPTCP_SUPPORTED" = "true" ]; then
+        echo -e "${GREEN}此版本支持MPTCP功能，您可以使用 'realm-x --mptcp' 管理MPTCP设置${NC}"
+    fi
+
     if [ -d "/etc/systemd/system" ] && [ -w "/etc/systemd/system" ]; then
         echo "创建systemd服务文件 $SERVICE_FILE"
         cat > "$SERVICE_FILE" << EOF
@@ -1033,7 +1412,7 @@ EOF
 Description=realm
 After=network-online.target
 Wants=network-online.target systemd-networkd-wait-online.service
- 
+
 [Service]
 Type=simple
 User=root
@@ -1041,7 +1420,7 @@ Restart=always
 RestartSec=5s
 DynamicUser=true
 ExecStart=$REALM_PATH -c $CONFIG_FILE
- 
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -1061,7 +1440,7 @@ EOF
 Description=realm
 After=network-online.target
 Wants=network-online.target systemd-networkd-wait-online.service
- 
+
 [Service]
 Type=simple
 User=root
@@ -1069,14 +1448,15 @@ Restart=always
 RestartSec=5s
 DynamicUser=true
 ExecStart=$REALM_PATH -c $CONFIG_FILE
- 
+
 [Install]
 WantedBy=multi-user.target
 EOF
         echo "服务文件已保存到 $SERVICE_FILE"
     fi
 
-    # 清理
+    install_command
+
     echo "清理临时文件"
     rm -f "$FILENAME"
     cd - > /dev/null
@@ -1088,17 +1468,23 @@ EOF
     echo -e "${GREEN}您现在可以使用 'realm-x -a' 命令添加转发规则${NC}"
 }
 
-# 显示已有转发规则
 show_current_rules() {
     if [ ! -f "$CONFIG_FILE" ]; then
         echo -e "${YELLOW}配置文件不存在: $CONFIG_FILE${NC}"
         return
     fi
-    
+
+    if grep -q "send_mptcp\|accept_mptcp" "$CONFIG_FILE" 2>/dev/null; then
+        echo -e "${BLUE}MPTCP配置状态:${NC}"
+        SEND_MPTCP=$(grep "send_mptcp" "$CONFIG_FILE" | grep -o "true\|false")
+        ACCEPT_MPTCP=$(grep "accept_mptcp" "$CONFIG_FILE" | grep -o "true\|false")
+        echo "send_mptcp: $SEND_MPTCP, accept_mptcp: $ACCEPT_MPTCP"
+        echo "------------------------------------"
+    fi
+
     echo -e "${GREEN}当前转发规则:${NC}"
     echo "------------------------------------"
     
-    # 提取并显示每个转发规则
     RULES=$(awk '
     BEGIN { count = 0; }
     /\[\[endpoints\]\]/ { 
@@ -1134,7 +1520,6 @@ show_current_rules() {
     echo "------------------------------------"
 }
 
-# 编辑配置文件
 edit_config() {
     check_root
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -1142,7 +1527,6 @@ edit_config() {
         return
     fi
     
-    # 检查是否有可用的编辑器
     if command -v nano &>/dev/null; then
         nano "$CONFIG_FILE"
     elif command -v vim &>/dev/null; then
@@ -1154,7 +1538,6 @@ edit_config() {
         return
     fi
     
-    # 编辑完成后重启服务
     echo "配置文件已编辑，是否重启服务? (y/n): "
     read restart
     if [[ "$restart" =~ ^[Yy]$ ]]; then
@@ -1168,7 +1551,6 @@ edit_config() {
     fi
 }
 
-# 显示帮助信息
 show_help() {
     echo -e "${BLUE}Realm 管理工具 (realm-x)${NC}"
     echo "使用方法: $SCRIPT_NAME [选项]"
@@ -1182,12 +1564,12 @@ show_help() {
     echo "  -a, --add        添加新的转发规则"
     echo "  -d, --delete     删除转发规则"
     echo "  -e, --edit       编辑配置文件"
+    echo "  -m, --mptcp      管理MPTCP设置"
     echo "  -u, --uninstall  卸载Realm"
     echo ""
     echo "不带参数运行将显示交互式菜单"
 }
 
-# 主菜单
 main_menu() {
     clear
     echo -e "${BLUE}====== Realm 管理脚本 ======${NC}"
@@ -1196,85 +1578,31 @@ main_menu() {
     echo "3. 添加新的转发规则"
     echo "4. 删除转发规则"
     echo "5. 编辑配置文件"
-    echo "6. 重启 Realm 服务"
-    echo "7. 查看 Realm 状态"
-    echo "8. 卸载 Realm"
-    echo "9. 退出"
+    echo "6. 管理MPTCP设置"
+    echo "7. 重启 Realm 服务"
+    echo "8. 查看 Realm 状态"
+    echo "9. 卸载 Realm"
+    echo "10. 退出"
     echo -e "${BLUE}===========================${NC}"
-    read -p "请选择操作 [1-9]: " choice
-    
+    read -p "请选择操作 [1-10]: " choice
     case $choice in
-        1)
-            perform_installation
-            ;;
-        2)
-            show_current_rules
-            ;;
-        3)
-            if check_installation; then
-                add_new_forwarding
-            else
-                echo -e "${YELLOW}Realm 尚未安装，请先选择选项 1 进行安装${NC}"
-            fi
-            ;;
-        4)
-            if check_installation; then
-                delete_forwarding
-            else
-                echo -e "${YELLOW}Realm 尚未安装，请先选择选项 1 进行安装${NC}"
-            fi
-            ;;
-        5)
-            if check_installation; then
-                edit_config
-            else
-                echo -e "${YELLOW}Realm 尚未安装，请先选择选项 1 进行安装${NC}"
-            fi
-            ;;
-        6)
-            check_root
-            if systemctl list-unit-files | grep -q realm.service; then
-                echo "重启 Realm 服务..."
-                systemctl restart realm
-                echo -e "${GREEN}服务已重启${NC}"
-            else
-                echo -e "${YELLOW}Realm 服务未安装${NC}"
-            fi
-            ;;
-        7)
-            if systemctl list-unit-files | grep -q realm.service; then
-                systemctl status realm
-            else
-                echo -e "${YELLOW}Realm 服务未安装${NC}"
-            fi
-            ;;
-        8)
-            if check_installation; then
-                read -p "确定要卸载 Realm 吗? (y/n): " confirm
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    uninstall_realm
-                else
-                    echo "已取消卸载"
-                fi
-            else
-                echo -e "${YELLOW}Realm 尚未安装${NC}"
-            fi
-            ;;
-        9)
-            echo "退出脚本"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}无效的选择，请重新选择${NC}"
-            ;;
+        1) perform_installation ;;
+        2) show_current_rules ;;
+        3) if check_installation; then add_new_forwarding; else echo -e "${YELLOW}Realm 尚未安装${NC}"; fi ;;
+        4) if check_installation; then delete_forwarding; else echo -e "${YELLOW}Realm 尚未安装${NC}"; fi ;;
+        5) if check_installation; then edit_config; else echo -e "${YELLOW}Realm 尚未安装${NC}"; fi ;;
+        6) if check_installation; then manage_mptcp; else echo -e "${YELLOW}Realm 尚未安装${NC}"; fi ;;
+        7) check_root; if systemctl list-unit-files | grep -q realm.service; then systemctl restart realm; echo -e "${GREEN}服务已重启${NC}"; else echo -e "${YELLOW}Realm 服务未安装${NC}"; fi ;;
+        8) if systemctl list-unit-files | grep -q realm.service; then systemctl status realm; else echo -e "${YELLOW}Realm 服务未安装${NC}"; fi ;;
+        9) if check_installation; then read -p "确定要卸载? (y/n): " confirm; if [[ "$confirm" =~ ^[Yy]$ ]]; then uninstall_realm; fi; else echo -e "${YELLOW}Realm 尚未安装${NC}"; fi ;;
+        10) echo "退出脚本"; exit 0 ;;
+        *) echo -e "${RED}无效选择${NC}" ;;
     esac
     
-    # 按任意键返回主菜单
     read -p "按任意键返回主菜单..." key
     main_menu
 }
 
-# 解析命令行参数
 parse_args() {
     case "$1" in
         -h|--help)
@@ -1331,6 +1659,14 @@ parse_args() {
             fi
             exit 0
             ;;
+        -m|--mptcp)
+            if check_installation; then
+                manage_mptcp
+            else
+                echo -e "${YELLOW}Realm 尚未安装，请先安装${NC}"
+            fi
+            exit 0
+            ;;
         -u|--uninstall)
             if check_installation; then
                 read -p "确定要卸载 Realm 吗? (y/n): " confirm
@@ -1345,7 +1681,6 @@ parse_args() {
             exit 0
             ;;
         "")
-            # 无参数，显示主菜单
             main_menu
             ;;
         *)
@@ -1356,17 +1691,14 @@ parse_args() {
     esac
 }
 
-# 直接解析参数并执行相应操作
 parse_args "$1"
 REALMX_SCRIPT
 
-    # 添加执行权限
     chmod +x "$SCRIPT_PATH"
     
     echo -e "${GREEN}realm-x命令已安装到系统${NC}"
 }
 
-# 显示已有转发规则
 show_current_rules() {
     if [ ! -f "$CONFIG_FILE" ]; then
         echo -e "${YELLOW}配置文件不存在: $CONFIG_FILE${NC}"
@@ -1376,7 +1708,6 @@ show_current_rules() {
     echo -e "${GREEN}当前转发规则:${NC}"
     echo "------------------------------------"
     
-    # 提取并显示每个转发规则
     RULES=$(awk '
     BEGIN { count = 0; }
     /\[\[endpoints\]\]/ { 
@@ -1412,7 +1743,6 @@ show_current_rules() {
     echo "------------------------------------"
 }
 
-# 编辑配置文件
 edit_config() {
     check_root
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -1420,7 +1750,6 @@ edit_config() {
         return
     fi
     
-    # 检查是否有可用的编辑器
     if command -v nano &>/dev/null; then
         nano "$CONFIG_FILE"
     elif command -v vim &>/dev/null; then
@@ -1432,7 +1761,6 @@ edit_config() {
         return
     fi
     
-    # 编辑完成后重启服务
     echo "配置文件已编辑，是否重启服务? (y/n): "
     read restart
     if [[ "$restart" =~ ^[Yy]$ ]]; then
@@ -1446,7 +1774,6 @@ edit_config() {
     fi
 }
 
-# 显示帮助信息
 show_help() {
     echo -e "${BLUE}Realm 管理工具 (realm-x)${NC}"
     echo "使用方法: $SCRIPT_NAME [选项]"
@@ -1460,12 +1787,12 @@ show_help() {
     echo "  -a, --add        添加新的转发规则"
     echo "  -d, --delete     删除转发规则"
     echo "  -e, --edit       编辑配置文件"
+    echo "  -m, --mptcp      管理MPTCP设置"
     echo "  -u, --uninstall  卸载Realm"
     echo ""
     echo "不带参数运行将显示交互式菜单"
 }
 
-# 主菜单
 main_menu() {
     clear
     echo -e "${BLUE}====== Realm 管理脚本 ======${NC}"
@@ -1474,85 +1801,31 @@ main_menu() {
     echo "3. 添加新的转发规则"
     echo "4. 删除转发规则"
     echo "5. 编辑配置文件"
-    echo "6. 重启 Realm 服务"
-    echo "7. 查看 Realm 状态"
-    echo "8. 卸载 Realm"
-    echo "9. 退出"
+    echo "6. 管理MPTCP设置"
+    echo "7. 重启 Realm 服务"
+    echo "8. 查看 Realm 状态"
+    echo "9. 卸载 Realm"
+    echo "10. 退出"
     echo -e "${BLUE}===========================${NC}"
-    read -p "请选择操作 [1-9]: " choice
-    
+    read -p "请选择操作 [1-10]: " choice
     case $choice in
-        1)
-            perform_installation
-            ;;
-        2)
-            show_current_rules
-            ;;
-        3)
-            if check_installation; then
-                add_new_forwarding
-            else
-                echo -e "${YELLOW}Realm 尚未安装，请先选择选项 1 进行安装${NC}"
-            fi
-            ;;
-        4)
-            if check_installation; then
-                delete_forwarding
-            else
-                echo -e "${YELLOW}Realm 尚未安装，请先选择选项 1 进行安装${NC}"
-            fi
-            ;;
-        5)
-            if check_installation; then
-                edit_config
-            else
-                echo -e "${YELLOW}Realm 尚未安装，请先选择选项 1 进行安装${NC}"
-            fi
-            ;;
-        6)
-            check_root
-            if systemctl list-unit-files | grep -q realm.service; then
-                echo "重启 Realm 服务..."
-                systemctl restart realm
-                echo -e "${GREEN}服务已重启${NC}"
-            else
-                echo -e "${YELLOW}Realm 服务未安装${NC}"
-            fi
-            ;;
-        7)
-            if systemctl list-unit-files | grep -q realm.service; then
-                systemctl status realm
-            else
-                echo -e "${YELLOW}Realm 服务未安装${NC}"
-            fi
-            ;;
-        8)
-            if check_installation; then
-                read -p "确定要卸载 Realm 吗? (y/n): " confirm
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    uninstall_realm
-                else
-                    echo "已取消卸载"
-                fi
-            else
-                echo -e "${YELLOW}Realm 尚未安装${NC}"
-            fi
-            ;;
-        9)
-            echo "退出脚本"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}无效的选择，请重新选择${NC}"
-            ;;
+        1) perform_installation ;;
+        2) show_current_rules ;;
+        3) if check_installation; then add_new_forwarding; else echo -e "${YELLOW}Realm 尚未安装${NC}"; fi ;;
+        4) if check_installation; then delete_forwarding; else echo -e "${YELLOW}Realm 尚未安装${NC}"; fi ;;
+        5) if check_installation; then edit_config; else echo -e "${YELLOW}Realm 尚未安装${NC}"; fi ;;
+        6) if check_installation; then manage_mptcp; else echo -e "${YELLOW}Realm 尚未安装${NC}"; fi ;;
+        7) check_root; if systemctl list-unit-files | grep -q realm.service; then systemctl restart realm; echo -e "${GREEN}服务已重启${NC}"; else echo -e "${YELLOW}Realm 服务未安装${NC}"; fi ;;
+        8) if systemctl list-unit-files | grep -q realm.service; then systemctl status realm; else echo -e "${YELLOW}Realm 服务未安装${NC}"; fi ;;
+        9) if check_installation; then read -p "确定要卸载? (y/n): " confirm; if [[ "$confirm" =~ ^[Yy]$ ]]; then uninstall_realm; fi; else echo -e "${YELLOW}Realm 尚未安装${NC}"; fi ;;
+        10) echo "退出脚本"; exit 0 ;;
+        *) echo -e "${RED}无效选择${NC}" ;;
     esac
     
-    # 按任意键返回主菜单
     read -p "按任意键返回主菜单..." key
     main_menu
 }
 
-# 解析命令行参数
 parse_args() {
     case "$1" in
         -h|--help)
@@ -1609,6 +1882,14 @@ parse_args() {
             fi
             exit 0
             ;;
+        -m|--mptcp)
+            if check_installation; then
+                manage_mptcp
+            else
+                echo -e "${YELLOW}Realm 尚未安装，请先安装${NC}"
+            fi
+            exit 0
+            ;;
         -u|--uninstall)
             if check_installation; then
                 read -p "确定要卸载 Realm 吗? (y/n): " confirm
@@ -1623,7 +1904,6 @@ parse_args() {
             exit 0
             ;;
         "")
-            # 无参数，显示主菜单
             main_menu
             ;;
         *)
@@ -1634,23 +1914,17 @@ parse_args() {
     esac
 }
 
-# 检查脚本运行方式
 if [[ "$0" != "$SCRIPT_PATH" && "$1" != "--self-install" ]]; then
-    # 是首次安装，通过curl|bash方式运行的脚本
     echo "首次运行，安装realm-x命令..."
     
-    # 确保有root权限
     check_root
     
-    # 安装realm-x命令
     install_command
     
     echo -e "${GREEN}您现在可以运行 'realm-x' 命令来管理Realm${NC}"
     echo "正在启动主菜单..."
     
-    # 现在使用安装好的realm-x命令来运行主菜单
     "$SCRIPT_PATH"
 else
-    # 脚本已经安装为realm-x命令，解析参数并执行相应操作
     parse_args "$1"
 fi
