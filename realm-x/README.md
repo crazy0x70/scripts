@@ -2,10 +2,10 @@
 
 脚本自动检测并支持以下架构：
 
-- x86_64 (Linux, macOS, Windows)
-- ARM64/aarch64 (Linux, macOS, Android)
-- ARMv7 (Linux)
-- ARM (Linux)
+- x86_64
+- ARM64/aarch64
+- ARMv7
+- ARM
 
 # 一键安装
 
@@ -36,6 +36,7 @@ realm-x支持以下命令行参数：
 |   -l, --list    | 列出当前转发规则  |
 |    -a, --add    | 添加新的转发规则  |
 |   -e, --edit    |   编辑配置文件    |
+|   -m, --mptcp    |   管理MPTCP设置    |
 | -u, --uninstall |     卸载Realm     |
 
 ## 配置文件位置
