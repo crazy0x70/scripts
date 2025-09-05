@@ -2,7 +2,9 @@
 
 set -e
 
-# 全局配置
+VERSION="1.0.0"
+VERSION_DATE="2025-09-05"
+
 INSTALL_PATH="/usr/local/bin"
 GCPSC_SCRIPT="$INSTALL_PATH/gcpsc"
 CONFIG_DIR="/etc/gcpsc"
@@ -10,7 +12,6 @@ CONFIG_FILE="$CONFIG_DIR/config.json"
 LASTCHECK_DIR="$CONFIG_DIR/lastcheck"
 SCRIPT_URL="https://raw.githubusercontent.com/crazy0x70/scripts/refs/heads/main/gcp-spot-check/gcp-spot-check.sh"
 
-# 检测日志文件路径
 if [ -w "/var/log" ]; then
     LOG_FILE="/var/log/gcpsc.log"
 else
@@ -20,12 +21,12 @@ fi
 LOGO="
 ========================================================
        Google Cloud Spot Instance 保活服务
-                  Version 0.3
+                Version: $VERSION
+                Date: $VERSION_DATE
                  (by crazy0x70)
 ========================================================
 "
 
-# 确保以root权限运行
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
         echo "请使用 root 或 sudo 运行此脚本！"
@@ -33,7 +34,6 @@ check_root() {
     fi
 }
 
-# 日志函数
 log() {
     local level=$1
     shift
@@ -41,15 +41,13 @@ log() {
     echo "[$(date +"%Y-%m-%d %H:%M:%S")] [$level] $msg" | tee -a "$LOG_FILE"
 }
 
-# 初始化目录和文件
 init_dirs() {
     mkdir -p "$CONFIG_DIR" "$LASTCHECK_DIR"
     touch "$LOG_FILE"
-    [ -f "$CONFIG_FILE" ] || echo '{"accounts":[]}' > "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE"  # 保护配置文件
+    [ -f "$CONFIG_FILE" ] || echo '{"version":"'$VERSION'","accounts":[]}' > "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
 }
 
-# 检查并安装 jq
 ensure_jq() {
     if ! command -v jq >/dev/null 2>&1; then
         log INFO "正在安装 jq..."
@@ -65,7 +63,6 @@ ensure_jq() {
     fi
 }
 
-# 检查并安装 gcloud
 ensure_gcloud() {
     if command -v gcloud >/dev/null 2>&1; then
         return 0
@@ -115,7 +112,6 @@ EOF
     log INFO "Google Cloud SDK 安装成功"
 }
 
-# 检查并安装 crontab
 ensure_crontab() {
     if ! command -v crontab >/dev/null 2>&1; then
         log INFO "正在安装 crontab..."
@@ -128,39 +124,34 @@ ensure_crontab() {
         fi
     fi
     
-    # 确保定时任务存在
     if ! crontab -l 2>/dev/null | grep -q "$GCPSC_SCRIPT check"; then
         (crontab -l 2>/dev/null ; echo "* * * * * $GCPSC_SCRIPT check >/dev/null 2>&1") | crontab -
         log INFO "已添加定时任务"
     fi
 }
 
-# 安装脚本
 perform_install() {
     check_root
     echo "$LOGO"
     echo "正在安装 GCP Spot Check 服务..."
     
-    # 初始化目录
     init_dirs
     
-    # 安装依赖
     ensure_jq
     ensure_gcloud
     ensure_crontab
     
-    # 下载脚本到系统
     log INFO "正在安装 gcpsc 命令..."
     curl -fsSL "$SCRIPT_URL" -o "$GCPSC_SCRIPT"
     chmod +x "$GCPSC_SCRIPT"
     
-    # 创建软链接
     ln -sf "$GCPSC_SCRIPT" /usr/bin/gcpsc
     
-    log INFO "安装完成！"
+    log INFO "安装完成！版本: $VERSION"
     echo
     echo "========================================="
     echo "安装成功！"
+    echo "版本: $VERSION"
     echo "使用命令: sudo gcpsc"
     echo "日志文件: $LOG_FILE"
     echo "配置目录: $CONFIG_DIR"
@@ -171,13 +162,11 @@ perform_install() {
     exec "$GCPSC_SCRIPT" __installed__
 }
 
-# 卸载脚本
 perform_uninstall() {
     check_root
     echo "$LOGO"
     echo "正在卸载 GCP Spot Check 服务..."
     
-    # 确认卸载
     read -p "确认要卸载吗？这将删除所有配置和日志 [y/N]: " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         echo "已取消卸载"
@@ -187,20 +176,16 @@ perform_uninstall() {
     echo
     echo "正在清理..."
     
-    # 删除定时任务
     if crontab -l 2>/dev/null | grep -q "$GCPSC_SCRIPT"; then
         (crontab -l 2>/dev/null | grep -v "$GCPSC_SCRIPT") | crontab -
         echo "✓ 已删除定时任务"
     fi
     
-    # 删除脚本文件
     [ -f "$GCPSC_SCRIPT" ] && rm -f "$GCPSC_SCRIPT" && echo "✓ 已删除主程序"
     [ -L "/usr/bin/gcpsc" ] && rm -f /usr/bin/gcpsc && echo "✓ 已删除命令链接"
     
-    # 删除配置目录
     [ -d "$CONFIG_DIR" ] && rm -rf "$CONFIG_DIR" && echo "✓ 已删除配置目录"
     
-    # 删除日志文件
     [ -f "$LOG_FILE" ] && rm -f "$LOG_FILE" && echo "✓ 已删除日志文件"
     
     echo
@@ -210,7 +195,6 @@ perform_uninstall() {
     echo "========================================="
 }
 
-# 激活账号
 activate_account() {
     local account=$1
     local acc_info=$(jq -r --arg acc "$account" '.accounts[] | select(.account == $acc)' "$CONFIG_FILE")
@@ -224,7 +208,51 @@ activate_account() {
     fi
 }
 
-# 添加新账号
+check_single_instance() {
+    local account=$1
+    local project=$2
+    local zone=$3
+    local instance=$4
+    
+    activate_account "$account"
+    
+    local status=$(gcloud compute instances describe "$instance" \
+        --zone="$zone" --project="$project" \
+        --format='get(status)' 2>/dev/null || echo "ERROR")
+    
+    log INFO "[$account/$project/$zone/$instance] 状态: $status"
+    
+    if [ "$status" != "RUNNING" ] && [ "$status" != "ERROR" ]; then
+        log WARN "[$account/$project/$zone/$instance] 不在运行状态，正在启动..."
+        if gcloud compute instances start "$instance" \
+            --zone="$zone" --project="$project" 2>/dev/null; then
+            log INFO "[$account/$project/$zone/$instance] 启动命令已发送"
+            
+            echo "等待实例启动..."
+            local max_wait=30
+            local waited=0
+            while [ $waited -lt $max_wait ]; do
+                sleep 2
+                local new_status=$(gcloud compute instances describe "$instance" \
+                    --zone="$zone" --project="$project" \
+                    --format='get(status)' 2>/dev/null || echo "ERROR")
+                if [ "$new_status" = "RUNNING" ]; then
+                    log INFO "[$account/$project/$zone/$instance] 实例已成功启动"
+                    break
+                fi
+                waited=$((waited + 2))
+            done
+        else
+            log ERROR "[$account/$project/$zone/$instance] 启动失败"
+        fi
+    elif [ "$status" = "RUNNING" ]; then
+        echo "实例状态正常：RUNNING"
+    fi
+    
+    local lastcheck_file="$LASTCHECK_DIR/${account//[@.]/_}_${project}_${zone}_${instance}"
+    echo "$(date +%s)" > "$lastcheck_file"
+}
+
 add_account() {
     echo
     echo "===== 添加 Google Cloud 账号 ====="
@@ -250,14 +278,12 @@ add_account() {
             
             account=$(gcloud config get-value account)
             
-            # 保存到配置
             jq --arg acc "$account" --arg file "$json_path" \
                 '.accounts += [{"account": $acc, "type": "service", "key_file": $file, "projects": []}]' \
                 "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
             
             log INFO "成功添加服务账号: $account"
             
-            # 询问是否自动发现资源
             read -p "是否自动发现并导入该账号下的所有实例？[y/N]: " auto_discover
             if [[ "$auto_discover" =~ ^[Yy]$ ]]; then
                 auto_discover_resources "$account"
@@ -277,20 +303,17 @@ add_account() {
             
             account=$(gcloud config get-value account)
             
-            # 移动密钥文件到配置目录
             key_file="$CONFIG_DIR/keys/${account}.json"
             mkdir -p "$CONFIG_DIR/keys"
             mv "$json_file" "$key_file"
             chmod 600 "$key_file"
             
-            # 保存到配置
             jq --arg acc "$account" --arg file "$key_file" \
                 '.accounts += [{"account": $acc, "type": "service", "key_file": $file, "projects": []}]' \
                 "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
             
             log INFO "成功添加服务账号: $account"
             
-            # 询问是否自动发现资源
             read -p "是否自动发现并导入该账号下的所有实例？[y/N]: " auto_discover
             if [[ "$auto_discover" =~ ^[Yy]$ ]]; then
                 auto_discover_resources "$account"
@@ -303,14 +326,12 @@ add_account() {
             
             account=$(gcloud config get-value account)
             
-            # 保存到配置
             jq --arg acc "$account" \
                 '.accounts += [{"account": $acc, "type": "user", "projects": []}]' \
                 "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
             
             log INFO "成功添加个人账号: $account"
             
-            # 询问是否自动发现资源
             read -p "是否自动发现并导入该账号下的所有实例？[y/N]: " auto_discover
             if [[ "$auto_discover" =~ ^[Yy]$ ]]; then
                 auto_discover_resources "$account"
@@ -327,17 +348,14 @@ add_account() {
     esac
 }
 
-# 自动发现并导入资源（修复计数问题）
 auto_discover_resources() {
     local account=$1
     
     echo
     echo "正在扫描账号下的所有资源，请稍候..."
     
-    # 激活账号
     activate_account "$account"
     
-    # 获取所有可访问的项目
     local projects=$(gcloud projects list --format="value(projectId)" 2>/dev/null)
     
     if [ -z "$projects" ]; then
@@ -346,6 +364,7 @@ auto_discover_resources() {
     fi
     
     local total_instances=0
+    local new_instances=0
     local default_interval=10
     
     echo "发现的项目："
@@ -358,12 +377,10 @@ auto_discover_resources() {
     echo
     echo "开始导入实例..."
     
-    # 遍历每个项目
     while IFS= read -r project_id; do
         [ -z "$project_id" ] && continue
         echo "正在扫描项目: $project_id"
         
-        # 获取该项目下的所有实例
         local instances_info=$(gcloud compute instances list --project="$project_id" \
             --format="csv[no-heading](name,zone,status)" 2>/dev/null)
         
@@ -372,52 +389,48 @@ auto_discover_resources() {
             continue
         fi
         
-        # 确保项目存在于配置中
         local project_exists=$(jq -r --arg acc "$account" --arg proj "$project_id" \
             '.accounts[] | select(.account == $acc) | .projects[] | select(.id == $proj) | .id' \
             "$CONFIG_FILE" 2>/dev/null)
         
         if [ -z "$project_exists" ]; then
-            # 添加项目
             jq --arg acc "$account" --arg proj "$project_id" \
                 '(.accounts[] | select(.account == $acc) | .projects) += [{"id": $proj, "zones": []}]' \
                 "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
         fi
         
-        # 处理每个实例
         while IFS=',' read -r instance_name zone_full status; do
             [ -z "$instance_name" ] && continue
             
-            # 提取zone名称
             zone=$(echo "$zone_full" | rev | cut -d'/' -f1 | rev)
             
+            total_instances=$((total_instances + 1))
             echo "  发现实例: $instance_name (区域: $zone, 状态: $status)"
             
-            # 检查区域是否存在
             local zone_exists=$(jq -r --arg acc "$account" --arg proj "$project_id" --arg z "$zone" \
                 '.accounts[] | select(.account == $acc) | .projects[] | select(.id == $proj) | .zones[] | select(.name == $z) | .name' \
                 "$CONFIG_FILE" 2>/dev/null)
             
             if [ -z "$zone_exists" ]; then
-                # 添加区域
                 jq --arg acc "$account" --arg proj "$project_id" --arg z "$zone" \
                     '(.accounts[] | select(.account == $acc) | .projects[] | select(.id == $proj) | .zones) += [{"name": $z, "instances": []}]' \
                     "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
             fi
             
-            # 检查实例是否已存在
             local instance_exists=$(jq -r --arg acc "$account" --arg proj "$project_id" --arg z "$zone" --arg inst "$instance_name" \
                 '.accounts[] | select(.account == $acc) | .projects[] | select(.id == $proj) | .zones[] | select(.name == $z) | .instances[] | select(.name == $inst) | .name' \
                 "$CONFIG_FILE" 2>/dev/null)
             
             if [ -z "$instance_exists" ]; then
-                # 添加实例
                 jq --arg acc "$account" --arg proj "$project_id" --arg z "$zone" --arg inst "$instance_name" --argjson int "$default_interval" \
                     '(.accounts[] | select(.account == $acc) | .projects[] | select(.id == $proj) | .zones[] | select(.name == $z) | .instances) += [{"name": $inst, "interval": $int}]' \
                     "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
                 
-                total_instances=$((total_instances + 1))
+                new_instances=$((new_instances + 1))
                 log INFO "导入实例: $account/$project_id/$zone/$instance_name"
+                
+                echo "  立即检查实例状态..."
+                check_single_instance "$account" "$project_id" "$zone" "$instance_name"
             else
                 echo "    实例已存在，跳过"
             fi
@@ -425,13 +438,16 @@ auto_discover_resources() {
     done <<< "$projects"
     
     echo
-    echo "自动发现完成！共导入 $total_instances 个新实例"
-    log INFO "账号 $account 自动发现完成，导入 $total_instances 个实例"
+    echo "========================================="
+    echo "自动发现完成！"
+    echo "发现实例总数: $total_instances"
+    echo "新导入实例数: $new_instances"
+    echo "========================================="
+    log INFO "账号 $account 自动发现完成，新导入 $new_instances 个实例（共发现 $total_instances 个）"
     
     read -p "按回车继续..."
 }
 
-# 显示账号菜单
 show_accounts_menu() {
     local accounts=$(jq -r '.accounts[].account' "$CONFIG_FILE" 2>/dev/null)
     
@@ -476,7 +492,6 @@ show_accounts_menu() {
     fi
 }
 
-# 显示账号下的所有实例（新增功能）
 show_account_instances() {
     local account=$1
     
@@ -485,7 +500,6 @@ show_account_instances() {
         echo "===== 账号: $account ====="
         echo
         
-        # 获取所有实例列表
         local instances_list=$(jq -r --arg acc "$account" '
             .accounts[] | select(.account == $acc) | 
             .projects[] as $p | 
@@ -522,34 +536,48 @@ show_account_instances() {
         echo "-----------------------------------------------------------"
         echo
         echo "操作选项："
-        echo "1) 修改实例检查间隔"
-        echo "2) 批量修改所有实例检查间隔"
-        echo "3) 删除实例监控"
-        echo "4) 自动发现新实例"
-        echo "5) 查看实例详情"
+        echo "1) 立即检查指定实例"
+        echo "2) 修改实例检查间隔"
+        echo "3) 批量修改所有实例检查间隔"
+        echo "4) 删除实例监控"
+        echo "5) 自动发现新实例"
+        echo "6) 查看实例详情"
         echo "0) 返回"
         
-        read -p "请选择 [0-5]: " choice
+        read -p "请选择 [0-6]: " choice
         
         case $choice in
             1)
+                read -p "请输入要检查的实例序号: " inst_num
+                local selected=$(echo "$instances_list" | sed -n "${inst_num}p")
+                if [ -n "$selected" ]; then
+                    IFS='|' read -r proj zone inst interval <<< "$selected"
+                    echo "正在检查实例 $inst ..."
+                    check_single_instance "$account" "$proj" "$zone" "$inst"
+                    read -p "按回车继续..."
+                fi
+                ;;
+                
+            2)
                 read -p "请输入要修改的实例序号: " inst_num
                 local selected=$(echo "$instances_list" | sed -n "${inst_num}p")
                 if [ -n "$selected" ]; then
                     IFS='|' read -r proj zone inst old_interval <<< "$selected"
                     read -p "请输入新的检查间隔（分钟，当前: $old_interval）: " new_interval
                     if [[ "$new_interval" =~ ^[0-9]+$ ]] && [ "$new_interval" -ge 1 ]; then
-                        # 更新特定实例的间隔
                         jq --arg acc "$account" --arg proj "$proj" --arg z "$zone" --arg inst "$inst" --argjson int "$new_interval" \
                             '(.accounts[] | select(.account == $acc) | .projects[] | select(.id == $proj) | .zones[] | select(.name == $z) | .instances[] | select(.name == $inst) | .interval) = $int' \
                             "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
                         echo "已更新 $inst 的检查间隔为 $new_interval 分钟"
                         log INFO "更新实例检查间隔: $account/$proj/$zone/$inst -> ${new_interval}分钟"
+                        
+                        echo "立即执行一次检查..."
+                        check_single_instance "$account" "$proj" "$zone" "$inst"
                     fi
                 fi
                 ;;
                 
-            2)
+            3)
                 read -p "请输入新的检查间隔（分钟）: " new_interval
                 if [[ "$new_interval" =~ ^[0-9]+$ ]] && [ "$new_interval" -ge 1 ]; then
                     jq --arg acc "$account" --argjson int "$new_interval" \
@@ -557,10 +585,18 @@ show_account_instances() {
                         "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
                     echo "已更新所有实例的检查间隔为 $new_interval 分钟"
                     log INFO "账号 $account 所有实例检查间隔更新为 $new_interval 分钟"
+                    
+                    read -p "是否立即检查所有实例？[y/N]: " check_now
+                    if [[ "$check_now" =~ ^[Yy]$ ]]; then
+                        echo "正在检查所有实例..."
+                        while IFS='|' read -r proj zone inst interval; do
+                            check_single_instance "$account" "$proj" "$zone" "$inst"
+                        done <<< "$instances_list"
+                    fi
                 fi
                 ;;
                 
-            3)
+            4)
                 read -p "请输入要删除的实例序号: " inst_num
                 local selected=$(echo "$instances_list" | sed -n "${inst_num}p")
                 if [ -n "$selected" ]; then
@@ -576,11 +612,11 @@ show_account_instances() {
                 fi
                 ;;
                 
-            4)
+            5)
                 auto_discover_resources "$account"
                 ;;
                 
-            5)
+            6)
                 read -p "请输入要查看的实例序号: " inst_num
                 local selected=$(echo "$instances_list" | sed -n "${inst_num}p")
                 if [ -n "$selected" ]; then
@@ -593,14 +629,21 @@ show_account_instances() {
                     echo "  实例: $inst"
                     echo "  检查间隔: $interval 分钟"
                     
-                    # 显示最后检查时间
                     local lastcheck_file="$LASTCHECK_DIR/${account//[@.]/_}_${proj}_${zone}_${inst}"
                     if [ -f "$lastcheck_file" ]; then
                         local lastcheck=$(cat "$lastcheck_file")
-                        echo "  最后检查: $(date -d "@$lastcheck" "+%Y-%m-%d %H:%M:%S")"
+                        echo "  最后检查: $(date -d "@$lastcheck" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date -r "$lastcheck" "+%Y-%m-%d %H:%M:%S")"
                     else
                         echo "  最后检查: 尚未执行"
                     fi
+                    
+                    echo
+                    echo "正在获取实例当前状态..."
+                    activate_account "$account"
+                    local current_status=$(gcloud compute instances describe "$inst" \
+                        --zone="$zone" --project="$proj" \
+                        --format='get(status)' 2>/dev/null || echo "无法获取")
+                    echo "  当前状态: $current_status"
                     
                     echo
                     read -p "按回车继续..."
@@ -618,16 +661,13 @@ show_account_instances() {
     done
 }
 
-# 检查所有实例（定时任务调用）
 check_all_instances() {
     local now=$(date +%s)
     
-    # 遍历所有配置的实例
     jq -c '.accounts[]' "$CONFIG_FILE" 2>/dev/null | while read -r account_json; do
         local account=$(echo "$account_json" | jq -r '.account')
         local acc_type=$(echo "$account_json" | jq -r '.type')
         
-        # 激活账号
         if [ "$acc_type" = "service" ]; then
             local key_file=$(echo "$account_json" | jq -r '.key_file')
             gcloud auth activate-service-account --key-file="$key_file" >/dev/null 2>&1
@@ -645,23 +685,19 @@ check_all_instances() {
                     local instance=$(echo "$instance_json" | jq -r '.name')
                     local interval=$(echo "$instance_json" | jq -r '.interval')
                     
-                    # 计算检查间隔（秒）
                     local interval_seconds
                     if [ "$interval" -le 60 ]; then
                         interval_seconds=$((interval * 60))
                     else
-                        # 大于60分钟，转换为小时
                         local hours=$((interval / 60))
                         interval_seconds=$((hours * 3600))
                     fi
                     
-                    # 检查是否需要执行
                     local lastcheck_file="$LASTCHECK_DIR/${account//[@.]/_}_${project}_${zone}_${instance}"
                     local lastcheck=0
                     [ -f "$lastcheck_file" ] && lastcheck=$(cat "$lastcheck_file")
                     
                     if [ $((now - lastcheck)) -ge "$interval_seconds" ]; then
-                        # 执行检查
                         local status=$(gcloud compute instances describe "$instance" \
                             --zone="$zone" --project="$project" \
                             --format='get(status)' 2>/dev/null || echo "ERROR")
@@ -678,7 +714,6 @@ check_all_instances() {
                             fi
                         fi
                         
-                        # 更新最后检查时间
                         echo "$now" > "$lastcheck_file"
                     fi
                 done
@@ -687,10 +722,11 @@ check_all_instances() {
     done
 }
 
-# 显示统计信息
 show_statistics() {
     echo
     echo "===== 监控统计 ====="
+    echo "版本: $VERSION ($VERSION_DATE)"
+    echo
     
     local total_accounts=$(jq '.accounts | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
     local total_projects=$(jq '[.accounts[].projects[]] | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
@@ -710,32 +746,80 @@ show_statistics() {
                 "$CONFIG_FILE" 2>/dev/null)
             echo "  $acc: $count 个实例"
         done <<< "$accounts"
+        
+        echo
+        echo "实例检查状态："
+        local running_count=0
+        local checked_count=0
+        local now=$(date +%s)
+        
+        for lastcheck_file in "$LASTCHECK_DIR"/*; do
+            [ -f "$lastcheck_file" ] || continue
+            checked_count=$((checked_count + 1))
+            local lastcheck=$(cat "$lastcheck_file")
+            if [ $((now - lastcheck)) -lt 600 ]; then
+                running_count=$((running_count + 1))
+            fi
+        done
+        
+        echo "  已检查过的实例: $checked_count"
+        echo "  最近10分钟活跃: $running_count"
     fi
     
     echo
     read -p "按回车继续..."
 }
 
-# 主菜单
+show_about() {
+    echo
+    echo "$LOGO"
+    echo
+    echo "关于本程序："
+    echo "  名称: Google Cloud Spot Instance 保活服务"
+    echo "  版本: $VERSION"
+    echo "  发布日期: $VERSION_DATE"
+    echo "  作者: crazy0x70"
+    echo "  GitHub: https://github.com/crazy0x70/"
+    echo
+    echo "功能特性："
+    echo "  • 自动监控 GCP Spot 实例状态"
+    echo "  • 实例停止时自动重启"
+    echo "  • 支持多账号、多项目管理"
+    echo "  • 自动发现并导入实例"
+    echo "  • 灵活的检查间隔设置"
+    echo "  • 完整的操作日志记录"
+    echo
+    echo "系统信息："
+    echo "  配置目录: $CONFIG_DIR"
+    echo "  日志文件: $LOG_FILE"
+    echo "  主程序: $GCPSC_SCRIPT"
+    echo
+    read -p "按回车继续..."
+}
+
 main_menu() {
     while true; do
         clear
         echo "$LOGO"
         
-        # 显示简要统计
         local instances_count=$(jq '[.accounts[].projects[].zones[].instances[]] | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
-        echo "当前监控: $instances_count 个实例"
+        local accounts_count=$(jq '.accounts | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
+        
+        echo "当前状态: $accounts_count 个账号，$instances_count 个实例"
         echo "日志文件: $LOG_FILE"
         echo
         
+        echo "========== 主菜单 =========="
         echo "1) 账号管理"
         echo "2) 快速发现所有资源"
         echo "3) 查看监控统计"
         echo "4) 查看运行日志"
         echo "5) 手动执行一次检查"
-        echo "6) 退出"
+        echo "6) 关于"
+        echo "0) 退出"
+        echo "============================"
         echo
-        read -p "请选择 [1-6]: " choice
+        read -p "请选择 [0-6]: " choice
         
         case $choice in
             1)
@@ -752,25 +836,23 @@ main_menu() {
                     read -p "请输入默认检查间隔（分钟，默认10）: " default_interval
                     default_interval=${default_interval:-10}
                     
+                    local total_new=0
                     while IFS= read -r account; do
                         echo
                         echo "处理账号: $account"
                         activate_account "$account"
                         
-                        # 简化的批量发现
                         local projects=$(gcloud projects list --format="value(projectId)" 2>/dev/null)
                         local imported=0
                         
                         while IFS= read -r project_id; do
                             [ -z "$project_id" ] && continue
                             
-                            # 获取实例
                             local instances_info=$(gcloud compute instances list --project="$project_id" \
                                 --format="csv[no-heading](name,zone)" 2>/dev/null)
                             
                             [ -z "$instances_info" ] && continue
                             
-                            # 确保项目存在
                             local project_exists=$(jq -r --arg acc "$account" --arg proj "$project_id" \
                                 '.accounts[] | select(.account == $acc) | .projects[] | select(.id == $proj) | .id' \
                                 "$CONFIG_FILE" 2>/dev/null)
@@ -781,18 +863,15 @@ main_menu() {
                                     "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
                             fi
                             
-                            # 处理实例
                             while IFS=',' read -r instance_name zone_full; do
                                 [ -z "$instance_name" ] && continue
                                 zone=$(echo "$zone_full" | rev | cut -d'/' -f1 | rev)
                                 
-                                # 检查并添加
                                 local instance_exists=$(jq -r --arg acc "$account" --arg proj "$project_id" --arg z "$zone" --arg inst "$instance_name" \
                                     '.accounts[] | select(.account == $acc) | .projects[] | select(.id == $proj) | .zones[] | select(.name == $z) | .instances[] | select(.name == $inst) | .name' \
                                     "$CONFIG_FILE" 2>/dev/null)
                                 
                                 if [ -z "$instance_exists" ]; then
-                                    # 确保区域存在
                                     local zone_exists=$(jq -r --arg acc "$account" --arg proj "$project_id" --arg z "$zone" \
                                         '.accounts[] | select(.account == $acc) | .projects[] | select(.id == $proj) | .zones[] | select(.name == $z) | .name' \
                                         "$CONFIG_FILE" 2>/dev/null)
@@ -803,22 +882,25 @@ main_menu() {
                                             "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
                                     fi
                                     
-                                    # 添加实例
                                     jq --arg acc "$account" --arg proj "$project_id" --arg z "$zone" --arg inst "$instance_name" --argjson int "$default_interval" \
                                         '(.accounts[] | select(.account == $acc) | .projects[] | select(.id == $proj) | .zones[] | select(.name == $z) | .instances) += [{"name": $inst, "interval": $int}]' \
                                         "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
                                     
                                     imported=$((imported + 1))
                                     echo "  + $project_id/$zone/$instance_name"
+                                    
+                                    check_single_instance "$account" "$project_id" "$zone" "$instance_name"
                                 fi
                             done <<< "$instances_info"
                         done <<< "$projects"
                         
                         echo "  账号 $account 导入 $imported 个新实例"
+                        total_new=$((total_new + imported))
                     done <<< "$accounts"
                     
                     echo
-                    echo "批量发现完成！"
+                    echo "批量发现完成！共导入 $total_new 个新实例"
+                    log INFO "批量发现完成，共导入 $total_new 个新实例"
                     read -p "按回车继续..."
                 fi
                 ;;
@@ -827,18 +909,23 @@ main_menu() {
                 ;;
             4)
                 echo
-                echo "===== 最近的日志 ====="
+                echo "===== 最近的日志（最新50条）====="
                 tail -n 50 "$LOG_FILE" 2>/dev/null || echo "暂无日志"
                 echo
                 read -p "按回车继续..."
                 ;;
             5)
-                echo "正在执行检查..."
+                echo "正在执行全量检查..."
                 check_all_instances
                 echo "检查完成！"
                 read -p "按回车继续..."
                 ;;
             6)
+                show_about
+                ;;
+            0)
+                echo
+                echo "感谢使用 GCP Spot Check 服务！"
                 echo "再见！"
                 exit 0
                 ;;
@@ -850,9 +937,7 @@ main_menu() {
     done
 }
 
-# 主程序入口
 main() {
-    # 处理安装和卸载
     if [ "$1" = "install" ]; then
         perform_install
         exit 0
@@ -861,24 +946,32 @@ main() {
         exit 0
     fi
     
-    # 如果是定时任务调用
     if [ "$1" = "check" ]; then
         check_all_instances
         exit 0
     fi
     
-    # 如果脚本不存在于系统位置，执行安装
+    if [ "$1" = "version" ] || [ "$1" = "-v" ] || [ "$1" = "--version" ]; then
+        echo "GCP Spot Check Version: $VERSION ($VERSION_DATE)"
+        exit 0
+    fi
+    
     if [ ! -f "$GCPSC_SCRIPT" ] && [ "$1" != "__installed__" ]; then
         perform_install
         exit 0
     fi
     
-    # 正常运行
     check_root
     init_dirs
     ensure_jq
+    
+    local config_version=$(jq -r '.version // "0.0.0"' "$CONFIG_FILE" 2>/dev/null)
+    if [ "$config_version" != "$VERSION" ]; then
+        jq --arg ver "$VERSION" '.version = $ver' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+        log INFO "配置文件版本已更新至 $VERSION"
+    fi
+    
     main_menu
 }
 
-# 执行主程序
 main "$@"
