@@ -101,17 +101,16 @@ EOM
 install_wrapper() {
     echo "$LOGO"
     [ "$(id -u)" -ne 0 ] && { echo "请用root或sudo运行本脚本！"; exit 1; }
-
-    ## 自身自动复制到 /usr/local/bin/gcpsc
-    cp "$0" "$GCPSC_SCRIPT"
+    GCPSC_URL="https://raw.githubusercontent.com/crazy0x70/scripts/refs/heads/main/gcp-spot-check/gcp-spot-check.sh"
+    curl -fsSL "$GCPSC_URL" -o "$GCPSC_SCRIPT"
     chmod +x "$GCPSC_SCRIPT"
     ln -sf "$GCPSC_SCRIPT" /usr/bin/gcpsc
     echo
     echo "已完成安装，后续只需输入 gcpsc 即可进入交互界面。"
     echo
-    # 安装完后，自动运行一次
     exec "$GCPSC_SCRIPT" __entry__
 }
+
 
 interactive_auth() {
     echo
